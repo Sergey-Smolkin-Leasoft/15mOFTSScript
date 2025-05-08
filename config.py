@@ -1,5 +1,8 @@
 # config.py - MODIFIED
 
+
+from datetime import timedelta # ИСПРАВЛЕНО: Импортируем timedelta
+
 TWELVEDATA_API_KEY = "9c614fea46d04e3d8c4f3f76b0541ab6" # Твой API ключ (замени на свой)
 
 # Активы в формате Twelve Data
@@ -14,6 +17,32 @@ TIMEFRAMES = {
     "H1": "1h",
     "M15": "15min",
 }
+
+TIMEFRAME_DURATIONS_MINUTES = {
+    "H1": 60,
+    "M15": 15
+    # Добавьте сюда другие таймфреймы, если они будут использоваться в TIMEFRAMES
+}
+
+DAILY_CHECK_TIME_UTC = "08:00:00" # Время проверки стратегии каждый день в формате HH:MM:SS (UTC)
+# Определите, насколько далеко в прошлое загружать данные для lookback при каждом ежедневном сканировании
+# Это должно быть как минимум LIQUIDITY_LOOKBACK в терминах M15 свечей, переведенных в timedelta
+# Например, если LIQUIDITY_LOOKBACK = 20 (40 свечей M15 для 2*lookback), это 40 * 15 минут = 600 минут = 10 часов.
+# Нужно обеспечить наличие H1 и M15 данных за этот период перед DAILY_CHECK_TIME_UTC.
+# Определим это как timedelta
+LOOKBACK_WINDOW_FOR_SCAN = timedelta(hours=12) # Пример: Окно данных за последние 12 часов для каждого ежедневного скана
+
+BACKTESTING_ASSET = "GBP/USD" # Актив для бэктестинга (оставьте, если нужен GBP/USD)
+BACKTESTING_START_DATE = "2023-01-01 00:00:00" # Начальная дата бэктеста: 1 января 2023 года 00:00:00 UTC
+BACKTESTING_END_DATE = "2023-01-31 23:59:59"   # Конечная дата бэктеста: 31 января 2023 года 23:59:59 UTC
+
+INITIAL_CAPITAL = 10000.0 # Начальный капитал для бэктеста
+RISK_PER_TRADE_FIXED = None # Или фиксированная сумма риска, например 100.0 (сделайте RISK_PER_TRADE_PERCENT = None)
+
+RISK_PER_TRADE_PERCENT = 1.0 # Риск на сделку в процентах от текущего капитала (например, 1.0 для 1%)
+TD_BACKTEST_OUTPUT_SIZE_H1 = 5000 # Максимум по вашему тарифу
+TD_BACKTEST_OUTPUT_SIZE_M15 = 5000 # Максимум по вашему тарифу
+ASSUMED_PIP_VALUE_PER_LOT = 10.0 # $10 за пипс на стандартный лот (100k единиц) для EUR/USD, GBP/USD
 
 # Сколько последних свечей запрашивать для каждого таймфрейма
 TD_OUTPUT_SIZES = {

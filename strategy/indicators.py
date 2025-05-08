@@ -2,113 +2,102 @@
 
 import pandas as pd
 import numpy as np
+from typing import List, Dict, Any
 
-def find_liquidity_levels(data: pd.DataFrame, lookback: int):
+def is_swing_high(data, i, lookback):
+    """Check if candle at index i is a Swing High."""
+    if i < lookback or i >= len(data) - lookback:
+        return False
+    # Ensure the index i is within the bounds to check lookback candles before and after
+    if i - lookback < 0 or i + lookback >= len(data):
+        return False
+
+    return data['High'].iloc[i] == data['High'].iloc[i-lookback : i+lookback+1].max()
+
+def is_swing_low(data, i, lookback):
+    """Check if candle at index i is a Swing Low."""
+    if i < lookback or i >= len(data) - lookback:
+        return False
+    # Ensure the index i is within the bounds to check lookback candles before and after
+    if i - lookback < 0 or i + lookback >= len(data):
+        return False
+
+    return data['Low'].iloc[i] == data['Low'].iloc[i-lookback : i+lookback+1].min()
+
+def find_liquidity_levels(data: pd.DataFrame, lookback: int, is_swing_points=False) -> List[Dict[str, Any]]:
     """
-    Определяет потенциальные уровни ликвидности (Swing High/Low)
-    с использованием простого фрактального подхода.
+    Finds Swing High/Low levels (potential liquidity) or just Swing Points.
+    is_swing_points=True returns all identified Swing Points as dictionaries.
+    When called with is_swing_points=False (e.g., for H1 context), it also returns all identified SH/SL as dictionaries.
+    Filtering for 'swept' levels happens in the strategy logic.
     """
-    highs = data['High']
-    lows = data['Low']
-    n = lookback // 2
+    levels = []
+    # Need enough data to check lookback candles on both sides, minimum is 2*lookback + 1
+    if data is None or data.empty or len(data) < lookback * 2 + 1:
+        return levels
 
-    # Определяем Swing High: свеча является максимальной в окне lookback
-    is_swing_high = highs.rolling(window=lookback, center=True).max() == highs
-    # Определяем Swing Low: свеча является минимальной в окне lookback
-    is_swing_low = lows.rolling(window=lookback, center=True).min() == lows
+    # Iterate only where we can check the full lookback window
+    for i in range(lookback, len(data) - lookback):
+        if is_swing_high(data, i, lookback):
+            # CORRECTED: Append dictionary instead of tuple
+            levels.append({'time': data.index[i], 'price': data['High'].iloc[i], 'type': 'BSL', 'is_swept': False})
+        if is_swing_low(data, i, lookback):
+            # CORRECTED: Append dictionary instead of tuple
+            levels.append({'time': data.index[i], 'price': data['Low'].iloc[i], 'type': 'SSL', 'is_swept': False})
 
-    # Фильтруем, оставляя только True значения и соответствующие индексы
-    swing_highs = data.index[is_swing_high].tolist()
-    swing_lows = data.index[is_swing_low].tolist()
+    # The filtering logic for is_swing_points=False is commented out in the provided code
+    # If it were active, it should build a list of dictionaries and return it.
+    # Since it's commented out, we just return the raw 'levels' list which should now contain dictionaries.
 
-    # Очистка: удаляем крайние точки, где lookback не может быть применен полностью
-    swing_highs = [idx for idx in swing_highs if idx >= data.index[n] and idx <= data.index[-n-1]]
-    swing_lows = [idx for idx in swing_lows if idx >= data.index[n] and idx <= data.index[-n-1]]
+    return levels # Return a list of dictionaries
 
 
-    # Возвращаем индексы и соответствующие цены
-    high_levels = [(idx, data['High'][idx]) for idx in swing_highs]
-    low_levels = [(idx, data['Low'][idx]) for idx in swing_lows]
-
-    return high_levels, low_levels
-
-def find_imbalances(data: pd.DataFrame, threshold: float):
+def find_imbalances(data: pd.DataFrame) -> List[Dict[str, Any]]:
     """
-    Находит имбалансы (Fair Value Gaps - FVG).
-    Возвращает список кортежей (индекс_первой_свечи_fvg, верхняя_граница_fvg, нижняя_граница_fvg, тип).
-    Тип: 'bullish' (цена ниже), 'bearish' (цена выше).
+    Finds Fair Value Gaps (FVG) or Imbalances in the data.
+    Returns a list of dictionaries describing the imbalances.
     """
     imbalances = []
+    if data is None or data.empty or len(data) < 3:
+        return imbalances
+
     for i in range(1, len(data) - 1):
-        # Bullish FVG: High[i-1] < Low[i+1] -> Gap between Low[i-1] and High[i+1]
-        # Bearish FVG: Low[i-1] > High[i+1] -> Gap between High[i-1] and Low[i+1]
+        candle_i_minus_1 = data.iloc[i-1]
+        candle_i = data.iloc[i]
+        candle_i_plus_1 = data.iloc[i+1]
 
-        # Bullish FVG (Low of current > High of previous) with gap to the next candle low
-        # This definition might vary. Let's use the standard ICT definition:
-        # Bullish FVG: The gap between the low of candle i-1 and the high of candle i+1
-        if data['High'].iloc[i-1] < data['Low'].iloc[i+1]:
-             # Gap is between data['Low'].iloc[i-1] and data['High'].iloc[i+1]
-             # Let's use the gap between candle i-1 and i+1 wicks around candle i
-             lower_bound = data['Low'].iloc[i-1]
-             upper_bound = data['High'].iloc[i+1]
-             if upper_bound - lower_bound > threshold:
-                 imbalances.append((data.index[i-1], lower_bound, upper_bound, 'bearish')) # Bearish FVG = price expected to go DOWN to fill it
+        # Bullish FVG: Low[i+1] < High[i-1]
+        if candle_i_plus_1['Low'] < candle_i_minus_1['High']:
+            fvg_high = candle_i_minus_1['High']
+            fvg_low = candle_i_plus_1['Low']
+            # Check if candle i (the middle candle) does not fill the gap
+            if not (candle_i['Low'] <= fvg_high and candle_i['High'] >= fvg_low):
+                 imbalances.append({
+                    'type': 'Bullish',
+                    'start_time': candle_i_minus_1.name,
+                    'end_time': candle_i_plus_1.name,
+                    'start_price': fvg_high,
+                    'end_price': fvg_low,
+                    'gap_high': fvg_high,
+                    'gap_low': fvg_low
+                 })
 
+        # Bearish FVG: High[i+1] > Low[i-1]
+        if candle_i_plus_1['High'] > candle_i_minus_1['Low']:
+             fvg_low = candle_i_minus_1['Low']
+             fvg_high = candle_i_plus_1['High']
+             # Check if candle i (the middle candle) does not fill the gap
+             if not (candle_i['Low'] <= fvg_high and candle_i['High'] >= fvg_low):
+                  imbalances.append({
+                     'type': 'Bearish',
+                     'start_time': candle_i_minus_1.name,
+                     'end_time': candle_i_plus_1.name,
+                     'start_price': fvg_low,
+                     'end_price': fvg_high,
+                     'gap_low': fvg_low,
+                     'gap_high': fvg_high
+                  })
 
-        # Bearish FVG: The gap between the high of candle i-1 and the low of candle i+1
-        if data['Low'].iloc[i-1] > data['High'].iloc[i+1]:
-            # Gap is between data['High'].iloc[i-1] and data['Low'].iloc[i+1]
-            lower_bound = data['Low'].iloc[i+1]
-            upper_bound = data['High'].iloc[i-1]
-            if upper_bound - lower_bound > threshold:
-                 imbalances.append((data.index[i-1], lower_bound, upper_bound, 'bullish')) # Bullish FVG = price expected to go UP to fill it
+    return imbalances
 
-
-    # Let's refine FVG definition based on common use:
-    # Bullish FVG: Between Low[i-1] and High[i+1]
-    # Bearish FVG: Between High[i-1] and Low[i+1]
-
-    imbalances_refined = []
-    for i in range(1, len(data) - 1):
-        # Bullish FVG: Low[i-1] > High[i+1] (Gap below candle i)
-        if data['Low'].iloc[i-1] > data['High'].iloc[i+1]:
-            lower_bound = data['High'].iloc[i+1] # Lower end of the gap
-            upper_bound = data['Low'].iloc[i-1] # Upper end of the gap
-            if upper_bound - lower_bound > threshold:
-                 imbalances_refined.append((data.index[i-1], lower_bound, upper_bound, 'bullish'))
-
-        # Bearish FVG: High[i-1] < Low[i+1] (Gap above candle i)
-        if data['High'].iloc[i-1] < data['Low'].iloc[i+1]:
-            lower_bound = data['High'].iloc[i-1] # Lower end of the gap
-            upper_bound = data['Low'].iloc[i+1] # Upper end of the gap
-            if upper_bound - lower_bound > threshold:
-                 imbalances_refined.append((data.index[i-1], lower_bound, upper_bound, 'bearish'))
-
-
-    # Let's use the refined definition
-    return imbalances_refined
-
-# Пример использования (можно удалить в финальной версии)
-if __name__ == '__main__':
-    print("Тестирование indicators...")
-    # Создаем фиктивные данные
-    data = pd.DataFrame({
-        'Open': [10, 11, 12, 13, 12, 11, 10, 9, 8, 9, 10, 11],
-        'High': [12, 13, 14, 15, 13, 12, 11, 10, 9, 10, 12, 13],
-        'Low': [9, 10, 11, 12, 11, 10, 9, 8, 7, 8, 9, 10],
-        'Close': [11, 12, 13, 12, 11, 10, 9, 8, 9, 10, 11, 12],
-        'Volume': 100
-    }, index=pd.to_datetime(['2023-01-01 00:00', '2023-01-01 00:15', '2023-01-01 00:30', '2023-01-01 00:45',
-                             '2023-01-01 01:00', '2023-01-01 01:15', '2023-01-01 01:30', '2023-01-01 01:45',
-                             '2023-01-01 02:00', '2023-01-01 02:15', '2023-01-01 02:30', '2023-01-01 02:45']))
-
-    # Найдем ликвидность
-    high_levels, low_levels = find_liquidity_levels(data, lookback=5)
-    print("Swing Highs:", high_levels)
-    print("Swing Lows:", low_levels)
-
-    # Найдем имбалансы
-    imbalances = find_imbalances(data, threshold=0.01)
-    print("Imbalances (FVG):", imbalances)
-
-    print("Тестирование завершено.")
+# Note: The find_structure_break function is NOT present in this file.

@@ -1,13 +1,14 @@
-# main.py
+# main.py - MODIFIED
 
 import time
 import pandas as pd
 import os
 from utils.data_fetcher import fetch_data
-from strategy.strategy import generate_signal
+# generate_signal теперь возвращает h1_context
+from strategy.strategy import generate_signal, determine_h1_context
 # Импортируем функцию сохранения графиков и название папки
 from utils.plot_charts import save_candlestick_chart, CHARTS_DIR
-# Импортируем обновленные конфиги (они теперь только для M15)
+# Импортируем обновленные конфиги
 from config import ASSETS, TIMEFRAMES, CHECK_INTERVAL_SECONDS, TD_OUTPUT_SIZES
 
 def clear_chart_directory():
@@ -27,12 +28,8 @@ def clear_chart_directory():
 
 
 def main():
-    # --- Очищаем папку с графиками при каждом запуске ---
     clear_chart_directory()
-    # ----------------------------------------------------
-
-    print("Запуск сигнального бота 15mOF (только M15, график за сегодня)...")
-
+    print("Запуск сигнального бота 15mOF с фильтрацией по H1 контексту...")
 
     while True:
         print("=" * 40)
@@ -41,54 +38,75 @@ def main():
         print("=" * 40)
 
         for asset in ASSETS:
-            timeframe = "M15" # Единственный используемый таймфрей
+            # --- Получаем данные H1 для определения контекста ---
+            print(f"\n--- Анализ {asset} (H1) для определения контекста ---")
+            data_h1 = fetch_data(asset, "H1")
 
-            print(f"\n--- Анализ актива: {asset} ({timeframe}) ---")
+            if data_h1 is None or data_h1.empty:
+                 print(f"  Не удалось получить данные H1 для {asset}. Пропускаем анализ этого актива.")
+                 continue
 
-            # Получаем только данные M15
-            # TD_OUTPUT_SIZES['M15'] определяет сколько всего свечей получаем (например, 500)
-            # Из этих 500 свечей функция save_candlestick_chart выберет только те, что за сегодня
-            data_m15 = fetch_data(asset, timeframe)
+            # --- Сохраняем H1 график ---
+            print(f"  Сохранение графика H1 для {asset}...")
+            # Для H1 графика не передаем уровни M15 сетапа
+            # Можно передать уровни H1 свипа, если determine_h1_context их возвращает
+            # Пока сохраняем просто свечи
+            save_candlestick_chart(data_h1, asset, "H1", None, None, None, None)
+            print("  График H1 сохранен.")
+            # --------------------------
+
+            # --- Получаем данные M15 для поиска сетапа ---
+            timeframe_m15 = "M15"
+            print(f"\n--- Анализ {asset} ({timeframe_m15}) для поиска сетапа ---")
+            data_m15 = fetch_data(asset, timeframe_m15)
+
+            if data_m15 is None or data_m15.empty:
+                 print(f"  Не удалось получить данные M15 для {asset}. Пропускаем поиск сетапа.")
+                 continue
 
 
-            # Генерируем сигнал: передаем только data_m15
-            signal, entry, stop_loss, take_profit, rr_val, status_sweep, status_of, status_target, comment = generate_signal(
-                asset, data_m15
+            # Генерируем сигнал: передаем данные H1 и M15
+            # generate_signal теперь возвращает h1_context
+            signal, entry, stop_loss, take_profit, rr_val, status_sweep_m15, status_of_m15, status_target_m15, comment, swept_level_m15, h1_context = generate_signal(
+                asset, data_h1, data_m15
             )
 
-            # Выводим статус каждого из трех главных условий
-            print(f"  Условие 1 (Снятие SSL/BSL): {'Выполнено' if status_sweep else 'Не выполнено'}")
-            print(f"  Условие 2 (Подтверждение M15 OF и вход по M15 имбалансу): {'Выполнено' if status_of else 'Не выполнено'}")
-            print(f"  Условие 3 (Цель с RR >= 1.5): {'Выполнено' if status_target else 'Не выполнено'}")
+            # Выводим определенный H1 контекст (он уже определен в generate_signal)
+            print(f"\n  Определенный H1 контекст: {h1_context}")
+
+
+            # Выводим статус условий на M15
+            print(f"  Условие M15 1 (Снятие SSL/BSL): {'Выполнено' if status_sweep_m15 else 'Не выполнено'}")
+            print(f"  Условие M15 2 (2 ступени OF и вход по M15 FVG): {'Выполнено' if status_of_m15 else 'Не выполнено'}")
+            print(f"  Условие M15 3 (Цель с RR >= 1.5): {'Выполнено' if status_target_m15 else 'Не выполнено'}")
+
 
             print(f"\n  Итоговый сигнал: {signal}")
 
             # Выводим детали, если сигнал есть
             if signal != 'NONE':
-                format_str = ".5f" if asset in ["GBP/USD", "EUR/USD"] else ".2f" # Форматирование все еще может зависеть от актива
+                format_str = ".5f" if asset in ["GBP/USD", "EUR/USD"] else ".2f"
                 print(f"  Потенциальный вход: {entry:{format_str}}")
                 print(f"  Потенциальный Stop Loss: {stop_loss:{format_str}}")
                 print(f"  Потенциальный Take Profit: {take_profit:{format_str}}")
                 print(f"  Reward/Risk: {rr_val:.2f}")
+                if swept_level_m15 is not None:
+                    print(f"  Уровень снятой ликвидности M15: {swept_level_m15:{format_str}}")
 
-            # --- Сохраняем только M15 график за сегодня В ЛЮБОМ СЛУЧАЕ ---
-            # Функция save_candlestick_chart теперь сама определяет диапазон "сегодня"
-            print(f"  Сохранение графика {timeframe} за сегодня для {asset} (даже если нет сигнала)...")
 
-            # Передаем только M15 данные. num_candles больше не нужен в вызове.
+            # --- Сохраняем M15 график с уровнями (уже было) ---
+            print(f"  Сохранение графика {timeframe_m15} для {asset}...")
+
             if data_m15 is not None and not data_m15.empty:
-                 # Передаем уровни entry, sl, tp, которые могут быть None
-                 # --- УБРАН num_candles из вызова ---
-                 save_candlestick_chart(data_m15, asset, timeframe, entry, stop_loss, take_profit)
-                 # ---------------------------------
+                 # Передаем уровни entry, sl, tp, swept_level_m15 (могут быть None)
+                 save_candlestick_chart(data_m15, asset, timeframe_m15, entry, stop_loss, take_profit, swept_level_m15)
             else:
-                  print(f"  Не удалось сохранить график {timeframe} для {asset}: нет данных.")
+                  print(f"  Не удалось сохранить график {timeframe_m15} для {asset}: нет данных.")
 
             print(f"  Комментарий стратегии: {comment}")
-            print("-" * (len(f"Анализ актива: {asset}") + len(timeframe) + 5))
+            print("-" * (len(f"Анализ актива: {asset}") + len(timeframe_m15) + 5))
 
 
-        # Проверка завершена по всем активным активам (сейчас только GBP/USD)
         print(f"\nПроверка по всем активам завершена.")
         print(f"Следующая проверка через {CHECK_INTERVAL_SECONDS // 60} минут. Графики сохранены в папке '{CHARTS_DIR}/'")
         time.sleep(CHECK_INTERVAL_SECONDS)

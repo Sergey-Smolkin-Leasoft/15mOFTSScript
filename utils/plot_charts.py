@@ -6,6 +6,8 @@ import pandas as pd
 import os
 from datetime import datetime
 import numpy as np
+# Импортируем LIQUIDITY_LOOKBACK из config для определения объема данных для графика
+from config import LIQUIDITY_LOOKBACK, TD_OUTPUT_SIZES
 
 # Директория для сохранения графиков
 CHARTS_DIR = 'signal_charts'
@@ -16,22 +18,12 @@ def ensure_chart_directory():
         os.makedirs(CHARTS_DIR)
         print(f"Создана директория для графиков: {CHARTS_DIR}")
 
-# --- ИЗМЕНЕНА ПОДПИСЬ ФУНКЦИИ: УБРАН num_candles ---
-def save_candlestick_chart(data: pd.DataFrame, asset: str, timeframe: str, entry: float | None, sl: float | None, tp: float | None):
+# --- ИЗМЕНЕНА ПОДПИСЬ ФУНКЦИИ: добавлен swept_level ---
+def save_candlestick_chart(data: pd.DataFrame, asset: str, timeframe: str, entry: float | None, sl: float | None, tp: float | None, swept_level: float | None):
 # ---------------------------------------------------
     """
-    Сохраняет свечной график за текущий день (с 00:00 UTC) с уровнями Entry, SL, TP.
-    Использует mplfinance для свечей и matplotlib для горизонтальных линий.
-
-    Args:
-        data: DataFrame с данными цены (обязательно с DatetimeIndex и колонками Open, High, Low, Close).
-              Предполагается, что индекс данных в UTC или является наивным UTC.
-        asset: Название актива (для заголовка и имени файла).
-        timeframe: Таймфрейм (для заголовка и имени файла).
-        entry: Уровень входа (может быть None).
-        sl: Уровень Stop Loss (может быть None).
-        tp: Уровень Take Profit (может быть None).
-        # num_candles больше не используется для определения диапазона
+    Сохраняет свечной график с уровнями Entry, SL, TP и уровнем снятой ликвидности.
+    Включает больше исторических данных.
     """
     if data is None or data.empty:
         print(f"Нет данных для построения графика {asset} {timeframe}.")
@@ -40,38 +32,23 @@ def save_candlestick_chart(data: pd.DataFrame, asset: str, timeframe: str, entry
     # mplfinance требует колонки Open, High, Low, Close (с большой буквы!) и DatetimeIndex
     # Наши данные из data_fetcher уже в таком формате.
 
-    # --- ИЗМЕНЕНИЕ: Берем данные только за сегодняшний день (на основе даты последней свечи) ---
-    # Получаем дату последней свечи
-    try:
-        last_ts = data.index[-1]
-        # Создаем временную метку на начало дня (00:00:00) для этой даты
-        start_of_day_ts = pd.Timestamp(last_ts.date())
-        # Если ваш индекс timezone-aware UTC, раскомментируйте следующую строку:
-        # start_of_day_ts = pd.Timestamp(last_ts.date(), tz='UTC')
-        # Если ваш индекс в другой TZ, нужна конвертация:
-        # start_of_day_ts = pd.Timestamp(last_ts.date(), tz='YourTimeZone').tz_convert('UTC') # Пример конвертации в UTC
+    # --- ИЗМЕНЕНИЕ: Берем данные за последние N свечей, а не только за сегодня ---
+    # Используем количество свечей из TD_OUTPUT_SIZES, но можно ограничить, если нужно
+    # Например, взять последние LIQUIDITY_LOOKBACK * 4 свечей, чтобы видеть контекст свипа
+    num_candles_to_plot = min(len(data), TD_OUTPUT_SIZES.get(timeframe, 500)) # Не больше, чем есть данных, и не больше чем запросили у TD
+    num_candles_to_plot = max(num_candles_to_plot, LIQUIDITY_LOOKBACK * 4) # Убедимся, что есть хотя бы минимальный контекст
 
-
-    except IndexError:
-         print(f"Ошибка: Индекс данных пуст для {asset} {timeframe}.")
-         return # Нет данных для получения даты
-
-    # Фильтруем данные, оставляя только свечи с начала дня и до конца имеющихся данных
-    plot_data = data[data.index >= start_of_day_ts].copy()
+    plot_data = data.iloc[-num_candles_to_plot:].copy()
     # ----------------------------------------------------------------------------
 
 
     if plot_data.empty:
-         # Это может произойти, если самая первая свеча данных уже позже начала дня
-         # или если в данных всего пара свечей, но их DateTime не попадает в логику фильтрации
-         print(f"Недостаточно данных за сегодня ({start_of_day_ts.strftime('%Y-%m-%d')}) для построения графика {asset} {timeframe}.")
-         # Можно добавить логику, чтобы в этом случае сохранялось хотя бы несколько последних свечей
-         # Но пока просто пропускаем сохранение графика за сегодня, если данных мало.
+         print(f"Недостаточно данных для построения графика {asset} {timeframe} за последние {num_candles_to_plot} свечей.")
          return
 
     ensure_chart_directory() # Убедимся, что папка существует
 
-    # --- Подготавливаем данные для горизонтальных линий для РУЧНОГО рисования ---
+    # --- Подготавливаем данные для горизонтальных линий ---
     hlines_to_draw = []
 
     # Форматируем уровни для включения в заголовок и подписи к линиям
@@ -87,48 +64,49 @@ def save_candlestick_chart(data: pd.DataFrame, asset: str, timeframe: str, entry
     if tp is not None:
         hlines_to_draw.append({'y': float(tp), 'color': 'purple', 'label': f'TP ({tp:{format_str}})'})
         levels_title += f" TP: {tp:{format_str}}"
-
-    # -------------------------------------------------------------------------
+    # --- ИЗМЕНЕНИЕ: Добавляем уровень снятой ликвидности ---
+    if swept_level is not None:
+        hlines_to_draw.append({'y': float(swept_level), 'color': 'orange', 'linestyle': '-', 'linewidth': 1, 'label': f'Свип ({swept_level:{format_str}})'})
+    # ----------------------------------------------------
 
     # Создаем строку заголовка
+    title_time_start = plot_data.index[0].strftime('%Y-%m-%d %H:%M UTC') # Время начала данных на графике
     title_time_end = plot_data.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-    title_time_start = plot_data.index[0].strftime('%H:%M UTC') # Добавим время начала данных на графике
     chart_title = f"{asset} - {timeframe} Setup: {title_time_start} - {title_time_end}{levels_title}"
 
 
     # Генерируем имя файла
     timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
     safe_asset_name = asset.replace('/', '_').replace('=', '_')
-    # Имя файла теперь содержит дату графика
-    filename = f"{safe_asset_name}_{timeframe}_day_{plot_data.index[-1].strftime('%Y%m%d')}_{timestamp_str}.png"
+    # Имя файла теперь содержит диапазон дат графика
+    filename = f"{safe_asset_name}_{timeframe}_chart_{plot_data.index[0].strftime('%Y%m%d_%H%M')}_to_{plot_data.index[-1].strftime('%Y%m%d_%H%M')}_{timestamp_str}.png"
     filepath = os.path.join(CHARTS_DIR, filename)
 
-    # Параметры для mplfinance (без параметра hlines)
+    # Параметры для mplfinance
     mc = mpf.make_marketcolors(up='green', down='red', wick='inherit', edge='inherit', volume='in')
     s  = mpf.make_mpf_style(base_mpf_style='yahoo', marketcolors=mc)
 
+    fig = None # Инициализируем fig = None на случай ошибки до создания фигуры
 
     try:
-        # --- Используем mplfinance для построения свечей на осях, но ВОЗВРАЩАЕМ figure/axes ---
+        # --- Используем mplfinance для построения свечей на осях, возвращаем figure/axes ---
         fig, axes = mpf.plot(plot_data,
-                             type='candle',           # Тип графика: свечи
-                             style=s,                 # Стиль графика
-                             title=chart_title,       # Заголовок
-                             ylabel='Цена',           # Подпись оси Y
-                             figscale=1.5,            # Масштаб фигуры
-                             volume=False,            # График объема (False отключает его под основным)
-                             tight_layout=True,       # Корректировка макета
-                             returnfig=True           # <-- ВАЖНО: Возвращаем figure и axes
-                             # savefig и closefig не указываем
+                             type='candle',
+                             style=s,
+                             title=chart_title,
+                             ylabel='Цена',
+                             figscale=1.5,
+                             volume=False,
+                             tight_layout=True,
+                             returnfig=True
                             )
 
         # Получаем объект осей, на котором нарисованы свечи
-        # Если volume=False, mplfinance возвращает один объект axes. Если volume=True, то список.
         ax = axes[0] if isinstance(axes, (list, np.ndarray)) else axes
 
-        # --- Вручную добавляем горизонтальные линии с помощью matplotlib после рисования свечей ---
+        # --- Вручную добавляем горизонтальные линии с помощью matplotlib ---
         for line_info in hlines_to_draw:
-             ax.axhline(line_info['y'], color=line_info['color'], linestyle='--', linewidth=1.5, label=line_info['label'])
+             ax.axhline(line_info['y'], color=line_info['color'], linestyle=line_info.get('linestyle', '--'), linewidth=line_info.get('linewidth', 1.5), label=line_info['label'])
 
         # Добавляем легенду для hlines
         if hlines_to_draw:
@@ -145,54 +123,53 @@ def save_candlestick_chart(data: pd.DataFrame, asset: str, timeframe: str, entry
         # Дополнительная информация для отладки диапазона данных
         if data is not None and not data.empty:
              print(f"Диапазон исходных данных: {data.index[0]} - {data.index[-1]}")
-             try:
-                last_ts_debug = data.index[-1]
-                start_of_day_ts_debug = pd.Timestamp(last_ts_debug.date())
-                print(f"Начало дня последней свечи: {start_of_day_ts_debug}")
-                plot_data_debug = data[data.index >= start_of_day_ts_debug].copy()
-                print(f"Количество свечей за сегодня после фильтрации: {len(plot_data_debug)}")
-             except Exception as e_debug:
-                print(f"Ошибка при отладке диапазона данных: {e_debug}")
+             if plot_data is not None and not plot_data.empty:
+                  print(f"Диапазон данных для графика: {plot_data.index[0]} - {plot_data.index[-1]}")
+             else:
+                  print("Данные для графика пустые после фильтрации/среза.")
 
 
-        # ---------------------------
     finally:
         # --- Всегда закрываем figure вручную ---
-        if 'fig' in locals() and fig is not None:
+        if fig is not None: # Проверяем, был ли объект фигуры успешно создан
              plt.close(fig)
+        else:
+             print("Объект фигуры не был создан, нет необходимости закрывать.")
 
 
-# Example Usage (Optional, for testing plot function directly)
+# Example Usage (Optional, for testing plot function directly) - Обновите, если нужно
 if __name__ == '__main__':
-     print("Тестирование сохранения свечных графиков за сегодня...")
-     # Create dummy data covering parts of two days
-     dates1 = pd.to_datetime([f'2023-01-01 23:{i:02}:00' for i in range(30)])
-     dates2 = pd.to_datetime([f'2023-01-02 00:{i:02}:00' for i in range(100)])
-     dates3 = pd.to_datetime([f'2023-01-02 10:{i:02}:00' for i in range(50)])
-     # Using pd.concat for modern pandas versions
-     dates = pd.concat([pd.Series(dates1), pd.Series(dates2), pd.Series(dates3)]).index
-
+     print("Тестирование сохранения свечных графиков...")
+     # Create dummy data covering several days
+     dates = pd.to_datetime([f'2023-01-0{d} {h}:{m}:00' for d in range(1, 5) for h in range(24) for m in range(0, 60, 15)]) # 4 дня M15
+     # Убедимся, что данных достаточно для lookback
+     dates = dates[:min(len(dates), LIQUIDITY_LOOKBACK * 10)] # Ограничим для примера
 
      dummy_data = pd.DataFrame({
-         'Open': np.linspace(100, 120, len(dates)),
-         'High': np.linspace(101, 121, len(dates)),
-         'Low': np.linspace(99, 119, len(dates)),
-         'Close': np.linspace(100.5, 120.5, len(dates)),
+         'Open': np.linspace(1.0000, 1.0500, len(dates)),
+         'High': np.linspace(1.0005, 1.0505, len(dates)),
+         'Low': np.linspace(0.9995, 1.0495, len(dates)),
+         'Close': np.linspace(1.0002, 1.0502, len(dates)),
          'Volume': 100
      }, index=dates)
-     # Simple price pattern
-     dummy_data['Close'] = dummy_data['Open'] + np.sin(np.linspace(0, 20, len(dates))) * 5
-     dummy_data['High'] = dummy_data[['Open', 'Close']].max(axis=1) + 1
-     dummy_data['Low'] = dummy_data[['Open', 'Close']].min(axis=1) - 1
+
+     # Add some price swings and a potential sweep
+     dummy_data.loc[dummy_data.index[50]:dummy_data.index[60], ['High', 'Close']] += 0.01 # Swing up
+     dummy_data.loc[dummy_data.index[70]:dummy_data.index[80], ['Low', 'Close']] -= 0.015 # Swing down (potential liquidity)
+     sweep_level_test = dummy_data.loc[dummy_data.index[80], 'Low'] # Price of the swing low
+     dummy_data.loc[dummy_data.index[81]:dummy_data.index[85], ['Low', 'Close']] = sweep_level_test - 0.001 # Sweep below the low
+
+
      dummy_data.index.name = 'Datetime'
 
-     # Test saving chart for the second day (Jan 02)
-     save_candlestick_chart(dummy_data, "TEST/DAY", "M15", 110, 105, 118)
-     # Test saving chart when levels are None
-     save_candlestick_chart(dummy_data.tail(50), "TEST/DAY", "M15", None, None, None)
-     # Test saving chart with minimal data (should plot only the last few candles if they are the only ones today)
-     save_candlestick_chart(dummy_data.tail(5), "TEST/MIN", "M15", 119, 117, 121)
-     # Test with data that ends right at midnight (should get all data for that day)
-     save_candlestick_chart(dummy_data.loc[:'2023-01-02 00:59:00'], "TEST/MIDNIGHT", "M15", 105, 104, 106)
+     # Test saving chart with levels and swept level
+     entry_test = dummy_data.loc[dummy_data.index[90], 'Close'] # Example entry after sweep
+     sl_test = sweep_level_test * 0.999 # Example SL below swept level
+     tp_test = entry_test + (entry_test - sl_test) * 2 # Example TP with RR=2
 
-     print("Тестирование сохранения свечных графиков за сегодня завершено.")
+     save_candlestick_chart(dummy_data, "TEST/SWEEP", "M15", entry_test, sl_test, tp_test, sweep_level_test)
+
+     # Test saving chart with no levels
+     save_candlestick_chart(dummy_data.tail(100), "TEST/NOLEVELS", "M15", None, None, None, None)
+
+     print("Тестирование сохранения свечных графиков завершено.")

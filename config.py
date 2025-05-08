@@ -30,7 +30,7 @@ DAILY_CHECK_TIME_UTC = "08:00:00" # Время проверки стратеги
 # Например, если LIQUIDITY_LOOKBACK = 20 (40 свечей M15 для 2*lookback), это 40 * 15 минут = 600 минут = 10 часов.
 # Нужно обеспечить наличие H1 и M15 данных за этот период перед DAILY_CHECK_TIME_UTC.
 # Определим это как timedelta
-LOOKBACK_WINDOW_FOR_SCAN = timedelta(hours=24) # Установите, например, 24 часа
+LOOKBACK_WINDOW_FOR_SCAN = timedelta(hours=72) # Установите, например, 24 часа
  # Пример: Окно данных за последние 12 часов для каждого ежедневного скана
 
 BACKTESTING_ASSET = "GBP/USD" # Актив для бэктестинга (оставьте, если нужен GBP/USD)

@@ -4,6 +4,12 @@ import pandas as pd
 import numpy as np
 from typing import List, Dict, Any
 
+# Символы для вывода (дублируются для удобства)
+CHECK = "✓"
+CROSS = "✗"
+ARROW = "→"
+
+
 def is_swing_high(data, i, lookback):
     """Check if candle at index i is a Swing High."""
     if i < lookback or i >= len(data) - lookback:
@@ -34,6 +40,7 @@ def find_liquidity_levels(data: pd.DataFrame, lookback: int, is_swing_points=Fal
     levels = []
     # Need enough data to check lookback candles on both sides, minimum is 2*lookback + 1
     if data is None or data.empty or len(data) < lookback * 2 + 1:
+        # print(f"      [{CROSS}] Недостаточно данных ({len(data)} свечей) для поиска ликвидности с lookback {lookback}.") # Отключено, чтобы не загромождать логи
         return levels
 
     # Iterate only where we can check the full lookback window
@@ -59,6 +66,7 @@ def find_imbalances(data: pd.DataFrame) -> List[Dict[str, Any]]:
     """
     imbalances = []
     if data is None or data.empty or len(data) < 3:
+        # print(f"      [{CROSS}] Недостаточно данных ({len(data)} свечей) для поиска имбалансов (нужно >= 3).") # Отключено
         return imbalances
 
     for i in range(1, len(data) - 1):
@@ -76,8 +84,8 @@ def find_imbalances(data: pd.DataFrame) -> List[Dict[str, Any]]:
                     'type': 'Bullish',
                     'start_time': candle_i_minus_1.name,
                     'end_time': candle_i_plus_1.name,
-                    'start_price': fvg_high,
-                    'end_price': fvg_low,
+                    'start_price': fvg_high, # High(i-1) - верхняя граница FVG
+                    'end_price': fvg_low,   # Low(i+1) - нижняя граница FVG
                     'gap_high': fvg_high,
                     'gap_low': fvg_low
                  })
@@ -92,8 +100,8 @@ def find_imbalances(data: pd.DataFrame) -> List[Dict[str, Any]]:
                      'type': 'Bearish',
                      'start_time': candle_i_minus_1.name,
                      'end_time': candle_i_plus_1.name,
-                     'start_price': fvg_low,
-                     'end_price': fvg_high,
+                     'start_price': fvg_low, # Low(i-1) - нижняя граница FVG
+                     'end_price': fvg_high,  # High(i+1) - верхняя граница FVG
                      'gap_low': fvg_low,
                      'gap_high': fvg_high
                   })

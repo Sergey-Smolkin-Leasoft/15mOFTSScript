@@ -14,6 +14,11 @@ from config import (
     TIMEFRAME_DURATIONS_MINUTES
 )
 
+# Символы для вывода (дублируются для удобства)
+CHECK = "✓"
+CROSS = "✗"
+ARROW = "→"
+
 # Helper function to calculate position size based on risk
 def calculate_position_size(account_balance, risk_percent, risk_fixed, stop_loss_pips, asset, assumed_pip_value_per_lot):
     """
@@ -140,17 +145,22 @@ class Backtester:
                 last_check_time = current_check_time # Обновляем last_check_time даже если пропускаем день
                 continue
 
+            # --- Разделитель дня ---
+            print(f"\n{'-'*40}")
+            print(f"--- Проверка дня: {trading_day.strftime('%Y-%m-%d')} ({current_check_time.strftime('%H:%M:%S')} UTC) ---")
+            print(f"{'-'*40}")
 
-            # print(f"\nОбработка дня и проверка в {current_check_time}")
 
             # --- Обработка открытой позиции (проверка SL/TP с last_check_time до current_check_time) ---
             if self.open_position:
+                print(f"\n  [{ARROW}] Проверка открытой позиции для {self.open_position['asset']} ({self.open_position['direction']})...")
                 pos = self.open_position
                 check_sl_tp_start_time = last_check_time
 
                 data_for_sl_tp_check = data_m15_full.loc[(data_m15_full.index > check_sl_tp_start_time) & (data_m15_full.index <= current_check_time)].copy()
 
                 if not data_for_sl_tp_check.empty:
+                    print(f"    [{ARROW}] Проверка SL/TP на свечах с {data_for_sl_tp_check.index.min()} по {data_for_sl_tp_check.index.max()}...")
                     for candle_time, candle_data in data_for_sl_tp_check.iterrows():
                         current_high = candle_data['High']
                         current_low = candle_data['Low']
@@ -212,60 +222,61 @@ class Backtester:
                             }
                             self.trades.append(trade_result)
                             self.open_position = None
-                            print(f"  Позиция закрыта ({trade_result['exit_reason']}) на {trade_result['exit_time']}. PnL: {trade_result['pnl_account_currency']:.2f}. Баланс: {self.current_balance:.2f}")
+                            print(f"    [{CHECK if pnl_account_currency > 0 else CROSS}] Позиция закрыта ({trade_result['exit_reason']}) на {trade_result['exit_time']}. PnL: {trade_result['pnl_account_currency']:.2f}. Баланс: {self.current_balance:.2f}")
                             break
+                    if self.open_position:
+                         print(f"    [{ARROW}] Позиция остается открытой.")
 
 
-            # --- Генерация сигнала на основе данных до current_check_time ---
-            # Генерируем сигнал только если нет открытой позиции
             if self.open_position is None:
-                # Срезаем данные для анализа: от current_check_time - lookback до current_check_time (включительно)
+                print(f"\n  [{ARROW}] Поиск нового сигнала на {current_check_time}...")
                 scan_window_start = current_check_time - self.lookback_window_for_scan
                 scan_window_end = current_check_time
 
                 data_m15_scan_window = data_m15_full.loc[(data_m15_full.index > scan_window_start) & (data_m15_full.index <= scan_window_end)].copy()
                 data_h1_scan_window = data_h1_full.loc[(data_h1_full.index > scan_window_start) & (data_h1_full.index <= scan_window_end)].copy()
 
-                # --- Дополнительное логирование срезов данных ---
-                print(f"\n  Сканирование для {current_check_time}:")
-                print(f"    Окно времени среза: {scan_window_start} - {scan_window_end}")
-                print(f"    Кол-во свечей в срезе: M15={len(data_m15_scan_window)}, H1={len(data_h1_scan_window)}")
+                print(f"    [{ARROW}] Сканируемое окно:")
+                print(f"      [{ARROW}] Время: {scan_window_start} - {scan_window_end}")
+                print(f"      [{ARROW}] Кол-во свечей: M15={len(data_m15_scan_window)}, H1={len(data_h1_scan_window)}")
                 if not data_m15_scan_window.empty:
-                    print(f"    Срез M15: {data_m15_scan_window.index.min()} - {data_m15_scan_window.index.max()}")
+                    print(f"      [{ARROW}] Срез M15: {data_m15_scan_window.index.min()} - {data_m15_scan_window.index.max()}")
                 if not data_h1_scan_window.empty:
-                     print(f"    Срез H1: {data_h1_scan_window.index.min()} - {data_h1_scan_window.index.max()}")
-                # --- Конец дополнительного логирования ---
+                     print(f"      [{ARROW}] Срез H1: {data_h1_scan_window.index.min()} - {data_h1_scan_window.index.max()}")
 
 
-                # Проверяем достаточность данных в этих срезах для работы стратегии
-                # Используем минимальные требования, определенные в __init__
-                if len(data_h1_scan_window) < self.min_h1_for_strategy_logic or len(data_m15_scan_window) < self.min_m15_for_strategy_logic:
-                    # ИСПРАВЛЕНО: Использование правильного имени переменной в f-string
-                    comment = f"Недостаточно данных в окне сканирования до {current_check_time} для стратегии (Требуется H1>={self.min_h1_for_strategy_logic}, M15>={self.min_m15_for_strategy_logic}). Пропускаем сигнал для этого дня."
-                    print(f"  {comment}")
-                    pass # Не генерируем сигнал, если данных в окне недостаточно
+                is_data_sufficient = len(data_h1_scan_window) >= self.min_h1_for_strategy_logic and len(data_m15_scan_window) >= self.min_m15_for_strategy_logic
 
+                if not is_data_sufficient:
+                    comment = f"Недостаточно данных в окне сканирования для стратегии (Требуется H1>={self.min_h1_for_strategy_logic}, M15>={self.min_m15_for_strategy_logic}). Пропускаем сигнал для этого дня."
+                    print(f"    [{CROSS}] {comment}")
+                    signal = 'NONE'
+                    entry, sl, tp, rr_val, status_sweep_m15, status_of_m15, status_target_m15, swept_level_m15, h1_context = None, None, None, None, False, 'NONE', False, None, 'NEUTRAL'
                 else:
-                    # print(f"  Запуск generate_signal на основе данных до {current_check_time}")
+                    print(f"    [{CHECK}] Данных в окне сканирования достаточно.")
                     signal, entry, sl, tp, rr_val, status_sweep_m15, status_of_m15, status_target_m15, comment, swept_level_m15, h1_context = generate_signal(
                         self.asset, data_h1_scan_window, data_m15_scan_window
                     )
 
                     if signal != 'NONE' and entry is not None and sl is not None and tp is not None:
+                        print(f"\n  [{ARROW}] Попытка открытия позиции...")
                         entry_candle_time = data_m15_full.index[data_m15_full.index > current_check_time].min()
 
                         if pd.isna(entry_candle_time) or entry_candle_time > self.end_date:
-                             # print(f"  Нет данных M15 после {current_check_time} или за пределами бэктеста для имитации входа. Сигнал сгенерирован, но вход не выполнен.")
-                             pass
+                             print(f"    [{CROSS}] Нет данных M15 после {current_check_time} или за пределами бэктеста для имитации входа. Сигнал сгенерирован, но вход не выполнен.")
+                             signal = 'NONE'
+                             entry, sl, tp, rr_val = None, None, None, None
 
                         else:
                             entry_price_actual = data_m15_full.loc[entry_candle_time]['Open']
+                            print(f"    [{ARROW}] Имитация входа по цене открытия {entry_price_actual:.5f} на свече {entry_candle_time}")
 
                             calculated_stop_loss_pips = calculate_pips(entry, sl, self.asset)
 
                             if calculated_stop_loss_pips is None or calculated_stop_loss_pips <= 0:
-                                 # print(f"  Рассчитанный размер стопа в пипсах некорректен ({calculated_stop_loss_pips}). Вход не выполнен.")
-                                 pass
+                                 print(f"    [{CROSS}] Рассчитанный размер стопа в пипсах некорректен ({calculated_stop_loss_pips}). Вход не выполнен.")
+                                 signal = 'NONE'
+                                 entry, sl, tp, rr_val = None, None, None, None
 
                             else:
                                 pip_value_unit = (0.0001 if "JPY" not in self.asset else 0.01)
@@ -279,16 +290,18 @@ class Backtester:
                                     tp_actual = entry_price_actual + calculated_take_profit_pips * pip_value_unit
 
 
-                                if (signal == 'BUY' and (sl_actual >= entry_price_actual or tp_actual <= entry_price_actual)) or \
-                                   (signal == 'SELL' and (sl_actual <= entry_price_actual or tp_actual >= entry_price_actual)):
-                                     # print(f"  Некорректные фактические уровни SL/TP после имитации входа по {entry_price_actual:.5f}. Сигнал отменен.")
-                                     pass
+                                if (signal == 'BUY' and (sl_actual is None or entry_price_actual is None or tp_actual is None or sl_actual >= entry_price_actual or tp_actual <= entry_price_actual)) or \
+                                   (signal == 'SELL' and (sl_actual is None or entry_price_actual is None or tp_actual is None or sl_actual <= entry_price_actual or tp_actual >= entry_price_actual)):
+                                     print(f"    [{CROSS}] Некорректные фактические уровни SL/TP после имитации входа по {entry_price_actual:.5f}. Сигнал отменен.")
+                                     signal = 'NONE'
+                                     entry, sl, tp, rr_val = None, None, None, None
 
                                 else:
-                                    rr_actual = calculate_rr(entry_price_actual, sl_actual, tp_actual, signal)
+                                    rr_actual = calculate_rr(entry_price_actual, sl_actual, tp_actual, signal, self.asset)
                                     if rr_actual is None or rr_actual < MIN_RR:
-                                         # print(f"  Фактический RR ({rr_actual:.2f}) после имитации входа ниже MIN_RR ({MIN_RR}). Сигнал отменен.")
-                                         pass
+                                         print(f"    [{CROSS}] Фактический RR ({rr_actual:.2f}) после имитации входа ниже MIN_RR ({MIN_RR}). Сигнал отменен.")
+                                         signal = 'NONE'
+                                         entry, sl, tp, rr_val = None, None, None, None
                                     else:
                                         stop_loss_pips_actual = calculate_pips(entry_price_actual, sl_actual, self.asset)
                                         volume_lots = calculate_position_size(
@@ -300,7 +313,11 @@ class Backtester:
                                             self.assumed_pip_value_per_lot
                                         )
 
-                                        if volume_lots > 0:
+                                        if volume_lots is None or volume_lots <= 0:
+                                             print(f"    [{CROSS}] Рассчитан нулевой или отрицательный объем лотов ({volume_lots:.2f}). Вход не выполнен.")
+                                             signal = 'NONE'
+                                             entry, sl, tp, rr_val = None, None, None, None
+                                        else:
                                             self.open_position = {
                                                 'asset': self.asset,
                                                 'direction': signal,
@@ -311,7 +328,10 @@ class Backtester:
                                                 'volume_lots': volume_lots,
                                                 'last_check_time': current_check_time
                                             }
-                                            print(f"  Открыта позиция: {signal} {volume_lots:.2f} лотов по {entry_price_actual:.5f} на {entry_candle_time}. SL: {sl_actual:.5f}, TP: {tp_actual:.5f}. RR: {rr_actual:.2f}")
+                                            print(f"    [{CHECK}] Позиция открыта: {signal} {volume_lots:.2f} лотов по {entry_price_actual:.5f} на {entry_candle_time}. SL: {sl_actual:.5f}, TP: {tp_actual:.5f}. Фактический RR: {rr_actual:.2f}")
+
+            if signal == 'NONE':
+                 print("  [{CROSS}] Сигнал для открытия позиции НЕ СГЕНЕРИРОВАН на этом дне.")
 
 
             last_check_time = current_check_time
@@ -323,171 +343,151 @@ class Backtester:
                  self.max_drawdown = drawdown
 
 
+        print(f"\n{'-'*40}")
+
+
+        print(f"\n{'-'*40}")
+        print(f"--- Завершение бэктеста. Проверка последней позиции... ---")
+        print(f"{'-'*40}")
         if self.open_position:
+             print(f"  [{ARROW}] Проверка открытой позиции для {self.open_position['asset']} ({self.open_position['direction']}) до конца данных...")
              pos = self.open_position
              check_sl_tp_start_time = last_check_time
+
              data_for_sl_tp_check = data_m15_full.loc[(data_m15_full.index > check_sl_tp_start_time)].copy()
 
+             position_closed_at_end = False
              if not data_for_sl_tp_check.empty:
-                 for candle_time, candle_data in data_for_sl_tp_check.iterrows():
-                     current_high = candle_data['High']
-                     current_low = candle_data['Low']
+                 print(f"    [{ARROW}] Проверка SL/TP на свечах с {data_for_sl_tp_check.index.min()} по {data_for_sl_tp_check.index.max()}...")
+             for candle_time, candle_data in data_for_sl_tp_check.iterrows():
+                 current_high = candle_data['High']
+                 current_low = candle_data['Low']
 
-                     hit_sl = False
-                     hit_tp = False
-                     exit_price = None
-                     exit_reason = None
+                 hit_sl = False
+                 hit_tp = False
+                 exit_price = None
+                 exit_reason = None
 
-                     if pos['direction'] == 'BUY':
-                         if current_low <= pos['sl']:
-                             hit_sl = True
-                             exit_price = pos['sl']
-                             exit_reason = 'SL'
-                         elif current_high >= pos['tp']:
-                             hit_tp = True
-                             exit_price = pos['tp']
-                             exit_reason = 'TP'
-                     elif pos['direction'] == 'SELL':
-                         if current_high >= pos['sl']:
-                             hit_sl = True
-                             exit_price = pos['sl']
-                             exit_reason = 'SL'
-                         elif current_low <= pos['tp']:
-                             hit_tp = True
-                             exit_price = pos['tp']
-                             exit_reason = 'TP'
+                 if pos['direction'] == 'BUY':
+                     if current_low <= pos['sl']:
+                         hit_sl = True
+                         exit_price = pos['sl']
+                         exit_reason = 'SL'
+                     elif current_high >= pos['tp']:
+                         hit_tp = True
+                         exit_price = pos['tp']
+                         exit_reason = 'TP'
+                 elif pos['direction'] == 'SELL':
+                     if current_high >= pos['sl']:
+                         hit_sl = True
+                         exit_price = pos['sl']
+                         exit_reason = 'SL'
+                     elif current_low <= pos['tp']:
+                         hit_tp = True
+                         exit_price = pos['tp']
+                         exit_reason = 'TP'
 
-                     if hit_sl or hit_tp:
-                         pips_profit = calculate_pips(exit_price, pos['entry_price'], self.asset)
-                         if pos['direction'] == 'SELL':
-                             pips_profit *= -1
+                 if hit_sl or hit_tp:
+                     pips_profit = calculate_pips(exit_price, pos['entry_price'], self.asset)
+                     if pos['direction'] == 'SELL':
+                         pips_profit *= -1
 
-                         pnl_account_currency = pips_profit * self.assumed_pip_value_per_lot * pos['volume_lots']
+                     pnl_account_currency = pips_profit * self.assumed_pip_value_per_lot * pos['volume_lots']
 
-                         self.current_balance += pnl_account_currency
-                         self.balance_history.append(self.current_balance)
+                     self.current_balance += pnl_account_currency
+                     self.balance_history.append(self.current_balance)
 
-                         if self.current_balance > self.peak_balance:
-                              self.peak_balance = self.current_balance
-                         drawdown = self.peak_balance - self.current_balance
-                         if drawdown > self.max_drawdown:
-                              self.max_drawdown = drawdown
+                     if self.current_balance > self.peak_balance:
+                          self.peak_balance = self.current_balance
+                     drawdown = self.peak_balance - self.current_balance
+                     if drawdown > self.max_drawdown:
+                          self.max_drawdown = drawdown
 
-                         trade_result = {
-                             'asset': self.asset,
-                             'direction': pos['direction'],
-                             'entry_time': pos['entry_time'],
-                             'entry_price': pos['entry_price'],
-                             'exit_time': candle_time,
-                             'exit_price': exit_price,
-                             'sl': pos['sl'],
-                             'tp': pos['tp'],
-                             'volume_lots': pos['volume_lots'],
-                             'pips': pips_profit,
-                             'pnl_account_currency': pnl_account_currency,
-                             'exit_reason': exit_reason,
-                             'balance_after': self.current_balance
-                         }
-                         self.trades.append(trade_result)
-                         self.open_position = None
-                         print(f"  Позиция закрыта ({trade_result['exit_reason']}) на {trade_result['exit_time']}. PnL: {trade_result['pnl_account_currency']:.2f}. Баланс: {self.current_balance:.2f}")
-                         break
+                     trade_result = {
+                         'asset': self.asset,
+                         'direction': pos['direction'],
+                         'entry_time': pos['entry_time'],
+                         'entry_price': pos['entry_price'],
+                         'exit_time': candle_time,
+                         'exit_price': exit_price,
+                         'sl': pos['sl'],
+                         'tp': pos['tp'],
+                         'volume_lots': pos['volume_lots'],
+                         'pips': pips_profit,
+                         'pnl_account_currency': pnl_account_currency,
+                         'exit_reason': exit_reason,
+                         'balance_after': self.current_balance
+                     }
+                     self.trades.append(trade_result)
+                     self.open_position = None
+                     position_closed_at_end = True
+                     print(f"    [{CHECK if pnl_account_currency > 0 else CROSS}] Позиция закрыта ({trade_result['exit_reason']}) на {trade_result['exit_time']}. PnL: {trade_result['pnl_account_currency']:.2f}. Баланс: {self.current_balance:.2f}")
+                     break
 
+             if self.open_position and not position_closed_at_end:
+                 print(f"  [{ARROW}] Позиция осталась открытой до конца бэктеста.")
+                 if not data_m15_full.empty:
+                     last_candle = data_m15_full.iloc[-1]
+                     exit_price = last_candle['Close']
+                     self.open_position = None
+                     print(f"    [{CROSS}] Позиция закрыта по концу бэктеста на {last_candle.index}. PnL: {exit_price - self.open_position['entry_price']:.2f}. Баланс: {self.current_balance:.2f}")
+             else:
+                  print(f"    [{ARROW}] Нет свечей M15 для проверки SL/TP после последней проверки. Позиция остается открытой (будет закрыта по концу бэктеста).")
 
-        if self.open_position:
-             pos = self.open_position
-             if not data_m15_full.empty:
-                 last_candle = data_m15_full.iloc[-1]
-                 exit_price = last_candle['Close']
-                 exit_time = last_candle.name
-                 exit_reason = 'EndOfBacktest'
-
-                 pips_profit = calculate_pips(exit_price, pos['entry_price'], self.asset)
-                 if pos['direction'] == 'SELL':
-                     pips_profit *= -1
-
-                 pnl_account_currency = pips_profit * self.assumed_pip_value_per_lot * pos['volume_lots']
-
-                 self.current_balance += pnl_account_currency
-                 self.balance_history.append(self.current_balance)
-
-                 if self.current_balance > self.peak_balance:
-                      self.peak_balance = self.current_balance
-                 drawdown = self.peak_balance - self.current_balance
-                 if drawdown > self.max_drawdown:
-                      self.max_drawdown = drawdown
-
-
-                 trade_result = {
-                     'asset': self.asset,
-                     'direction': pos['direction'],
-                     'entry_time': pos['entry_time'],
-                     'entry_price': pos['entry_price'],
-                     'exit_time': exit_time,
-                     'exit_price': exit_price,
-                     'sl': pos['sl'],
-                     'tp': pos['tp'],
-                     'volume_lots': pos['volume_lots'],
-                     'pips': pips_profit,
-                     'pnl_account_currency': pnl_account_currency,
-                     'exit_reason': exit_reason,
-                     'balance_after': self.current_balance
-                 }
-                 self.trades.append(trade_result)
-                 self.open_position = None
-                 print(f"  Позиция закрыта ({trade_result['exit_reason']}) на {trade_result['exit_time']}. PnL: {trade_result['pnl_account_currency']:.2f}. Баланс: {self.current_balance:.2f}")
+        self.report_results()
 
 
     def report_results(self):
         """Выводит отчет о результатах бэктеста."""
         total_trades = len(self.trades)
-        if total_trades == 0:
-            print("\n--- Результаты Бэктеста ---")
-            print("Нет завершенных сделок за период бэктеста.")
-            print(f"Начальный капитал: {self.initial_capital:.2f}")
-            print(f"Конечный капитал: {self.current_balance:.2f}")
-            print(f"Максимальная просадка (в валюте счета): {self.max_drawdown:.2f}")
-            print("-" * 25)
-            return
-
-        winning_trades = [t for t in self.trades if t['pnl_account_currency'] > 0]
-        losing_trades = [t for t in self.trades if t['pnl_account_currency'] <= 0]
-
-        total_profit_pips = sum(t['pips'] for t in self.trades)
-        total_profit_currency = sum(t['pnl_account_currency'] for t in self.trades)
-
-        win_rate = len(winning_trades) / total_trades * 100 if total_trades > 0 else 0
-
-        total_wins_currency = sum(t['pnl_account_currency'] for t in winning_trades)
-        total_losses_currency = abs(sum(t['pnl_account_currency'] for t in losing_trades))
-
-        profit_factor = total_wins_currency / total_losses_currency if total_losses_currency > 0 else float('inf')
-
-
-        print("\n--- Результаты Бэктеста ---")
+        print("\n" + "="*50)
+        print("              --- Финальные Результаты Бэктеста ---")
+        print("="*50)
         print(f"Актив: {self.asset}")
         print(f"Период: {self.start_date.strftime('%Y-%m-%d %H:%M:%S')} - {self.end_date.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Ежедневная проверка в: {self.daily_check_time_obj.strftime('%H:%M:%S')} UTC")
         print(f"Окно Lookback для сканирования: {self.lookback_window_for_scan}")
+        print("-" * 50)
         print(f"Начальный капитал: {self.initial_capital:.2f}")
         print(f"Конечный капитал: {self.current_balance:.2f}")
-        print(f"Чистая прибыль (в валюте счета): {self.current_balance - self.initial_capital:.2f}")
-        print(f"Общая прибыль (с учетом закрытых сделок, в валюте счета): {total_profit_currency:.2f}")
-        print(f"Общая прибыль (Pips): {total_profit_pips:.2f}")
+        net_profit = self.current_balance - self.initial_capital
+        print(f"Чистая прибыль (в валюте счета): {net_profit:.2f} ({'+' if net_profit >= 0 else ''}{net_profit/self.initial_capital*100:.2f}%)")
+        print("-" * 50)
         print(f"Всего сделок: {total_trades}")
-        print(f"Прибыльных сделок: {len(winning_trades)}")
-        print(f"Убыточных сделок: {len(losing_trades)}")
-        print(f"Процент выигрышей: {win_rate:.2f}%")
-        print(f"Максимальная просадка (в валюте счета): {self.max_drawdown:.2f}")
-        print(f"Профит-фактор (в валюте счета): {profit_factor:.2f}" if profit_factor != float('inf') else "Профит-фактор: Inf (нет убыточных сделок)")
-        print("-" * 25)
-        print("Список завершенных сделок:")
-        trades_df = pd.DataFrame(self.trades)
-        if not trades_df.empty:
-             display_cols = ['entry_time', 'exit_time', 'direction', 'entry_price', 'exit_price', 'sl', 'tp', 'volume_lots', 'pips', 'pnl_account_currency', 'exit_reason', 'balance_after']
-             trades_df = trades_df.sort_values(by='entry_time')
-             print(trades_df[display_cols].to_string())
-        print("-" * 25)
+
+        if total_trades > 0:
+            winning_trades = [t for t in self.trades if t['pnl_account_currency'] > 0]
+            losing_trades = [t for t in self.trades if t['pnl_account_currency'] <= 0]
+
+            total_profit_pips = sum(t['pips'] for t in self.trades)
+            total_profit_currency = sum(t['pnl_account_currency'] for t in self.trades)
+
+            win_rate = len(winning_trades) / total_trades * 100
+
+            total_wins_currency = sum(t['pnl_account_currency'] for t in winning_trades)
+            total_losses_currency = abs(sum(t['pnl_account_currency'] for t in losing_trades))
+
+            profit_factor = total_wins_currency / total_losses_currency if total_losses_currency > 0 else float('inf')
+
+            print(f"Прибыльных сделок: {len(winning_trades)}")
+            print(f"Убыточных сделок: {len(losing_trades)}")
+            print(f"Процент выигрышей: {win_rate:.2f}%")
+            print("-" * 50)
+            print(f"Общая прибыль (в валюте счета): {total_profit_currency:.2f}")
+            print(f"Общая прибыль (Pips): {total_profit_pips:.2f}")
+            print(f"Профит-фактор (в валюте счета): {profit_factor:.2f}" if profit_factor != float('inf') else "Профит-фактор: Inf (нет убыточных сделок)")
+            print("-" * 50)
+            print(f"Максимальная просадка (в валюте счета): {self.max_drawdown:.2f} ({self.max_drawdown/self.initial_capital*100:.2f}%)" if self.initial_capital > 0 else f"Максимальная просадка (в валюте счета): {self.max_drawdown:.2f}")
+
+            print("\nСписок завершенных сделок:")
+            trades_df = pd.DataFrame(self.trades)
+            display_cols = ['entry_time', 'exit_time', 'direction', 'entry_price', 'exit_price', 'sl', 'tp', 'volume_lots', 'pips', 'pnl_account_currency', 'exit_reason', 'balance_after']
+            trades_df = trades_df.sort_values(by='entry_time')
+            print(trades_df[display_cols].to_string(index=False))
+        else:
+             print("Нет завершенных сделок за период бэктеста.")
+
+        print("="*50)
 
 
 if __name__ == "__main__":
@@ -518,4 +518,3 @@ if __name__ == "__main__":
             lookback_window_for_scan=LOOKBACK_WINDOW_FOR_SCAN
         )
         backtester.run()
-        backtester.report_results() 

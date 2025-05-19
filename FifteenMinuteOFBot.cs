@@ -91,8 +91,10 @@ namespace cAlgo.Robots
         [Parameter("---- 15mOF Strategy Parameters ----", Group = "Strategy")]
         public string Separator2 { get; set; } // Dummy for spacing
 
-        [Parameter("Risk per Trade (%)", DefaultValue = 1.0, MinValue = 0.1, MaxValue = 5.0, Step = 0.1, Group = "Strategy")]
-        public double RiskPercentPerTrade { get; set; }
+        // Risk per Trade is now a fixed constant
+        // [Parameter("Risk per Trade (%)", DefaultValue = 1.0, MinValue = 0.1, MaxValue = 5.0, Step = 0.1, Group = "Strategy")]
+        // public double RiskPercentPerTrade { get; set; }
+        private const double RiskPercentPerTrade = 1.0;
 
         [Parameter("Min Risk/Reward Ratio", DefaultValue = 1.5, MinValue = 0.5, Step = 0.1, Group = "Strategy")]
         public double MinRR { get; set; }
@@ -135,7 +137,7 @@ namespace cAlgo.Robots
             Print($"LotSize (Units): {Symbol.LotSize}");
             Print($"---------------------");
             Print($"D1 Context: Days={D1DaysForContext}, Min%Change={D1PercentageChangeForContext}");
-            Print($"Strategy: Risk={RiskPercentPerTrade}%, SL Offset Ticks={StopLossOffsetTicks}, Label='{TradeLabel}' (Using Fixed RR=2.0)");
+            Print($"Strategy: Risk={RiskPercentPerTrade}% (Fixed), SL Offset Ticks={StopLossOffsetTicks}, Label='{TradeLabel}'");
             Print($"LS Params: Lookback={LSLookbackBars}, DetectionWindow={LSDetectionWindowBars}");
             Print($"Rule 1 LS Params: Lookback={Rule1_LSLookbackBars}, DetectionWindow={Rule1_LSDetectionWindowBars}");
             Print($"FVG Params: Lookback={FVGLookbackBars}, TestWindow={FVGTestWindowBars}, ImpulseLookback={FVGImpulseLookbackBars}");
@@ -259,7 +261,7 @@ namespace cAlgo.Robots
 
             TradeExecutionInfo tradeInfo = null;
             bool entryTriggerFound = false;
-            double entryPrice = Bars.ClosePrices.Last(1); // Default entry is close of the trigger bar
+            double specificEntryPrice = 0; // Will be set to FVG test level or LS swept level
 
             if (_isArmedForLong)
             {
@@ -269,11 +271,12 @@ namespace cAlgo.Robots
                                                                     fvg.TestBarIndex == 1); // Tested on last closed bar
                 if (bullishEntryFVG != null)
                 {
-                    Print($"ARMED LONG: Bullish FVG Test entry trigger found at {bullishEntryFVG.Time}, tested by bar {Bars.OpenTimes.Last(1)}");
+                    specificEntryPrice = bullishEntryFVG.Top; // Entry at the FVG's top border for bullish test
+                    Print($"ARMED LONG: Bullish FVG Test entry trigger found. Target Entry Price: {specificEntryPrice.ToString("F"+Symbol.Digits)} (FVG Top @ {bullishEntryFVG.Time})");
                     tradeInfo = new TradeExecutionInfo(true) 
                     {
-                        EntryTriggerTime = Bars.OpenTimes.Last(1),
-                        EntryPrice = entryPrice, 
+                        EntryTriggerTime = Bars.OpenTimes.Last(1), // Time of the bar that confirmed test
+                        EntryPrice = specificEntryPrice, 
                         EntryFVG = bullishEntryFVG
                     };
                     entryTriggerFound = true;
@@ -286,11 +289,12 @@ namespace cAlgo.Robots
                                                                                 ls.ConfirmationBarIndex == 1); // Confirmed on last closed bar
                     if (bullishEntryLS != null)
                     {
-                        Print($"ARMED LONG: Bullish Local LS entry trigger found at {bullishEntryLS.Time}");
+                        specificEntryPrice = bullishEntryLS.SweptLevel; // Entry at the swept level
+                        Print($"ARMED LONG: Bullish Local LS entry trigger found. Target Entry Price: {specificEntryPrice.ToString("F"+Symbol.Digits)} (Swept Low @ {bullishEntryLS.Time})");
                         tradeInfo = new TradeExecutionInfo(true)
                         {
-                            EntryTriggerTime = Bars.OpenTimes.Last(1),
-                            EntryPrice = entryPrice,
+                            EntryTriggerTime = Bars.OpenTimes.Last(1), // Time of the bar that confirmed LS
+                            EntryPrice = specificEntryPrice,
                             EntryLS = bullishEntryLS
                         };
                         entryTriggerFound = true;
@@ -305,11 +309,12 @@ namespace cAlgo.Robots
                                                                     fvg.TestBarIndex == 1); // Tested on last closed bar
                 if (bearishEntryFVG != null)
                 {
-                    Print($"ARMED SHORT: Bearish FVG Test entry trigger found at {bearishEntryFVG.Time}, tested by bar {Bars.OpenTimes.Last(1)}");
+                    specificEntryPrice = bearishEntryFVG.Bottom; // Entry at the FVG's bottom border for bearish test
+                    Print($"ARMED SHORT: Bearish FVG Test entry trigger found. Target Entry Price: {specificEntryPrice.ToString("F"+Symbol.Digits)} (FVG Bottom @ {bearishEntryFVG.Time})");
                     tradeInfo = new TradeExecutionInfo(false) 
                     {
-                        EntryTriggerTime = Bars.OpenTimes.Last(1),
-                        EntryPrice = entryPrice, 
+                        EntryTriggerTime = Bars.OpenTimes.Last(1), // Time of the bar that confirmed test
+                        EntryPrice = specificEntryPrice, 
                         EntryFVG = bearishEntryFVG
                     };
                     entryTriggerFound = true;
@@ -322,11 +327,12 @@ namespace cAlgo.Robots
                                                                                  ls.ConfirmationBarIndex == 1); // Confirmed on last closed bar
                     if (bearishEntryLS != null)
                     {
-                        Print($"ARMED SHORT: Bearish Local LS entry trigger found at {bearishEntryLS.Time}");
+                        specificEntryPrice = bearishEntryLS.SweptLevel; // Entry at the swept level
+                        Print($"ARMED SHORT: Bearish Local LS entry trigger found. Target Entry Price: {specificEntryPrice.ToString("F"+Symbol.Digits)} (Swept High @ {bearishEntryLS.Time})");
                         tradeInfo = new TradeExecutionInfo(false)
                         {
-                            EntryTriggerTime = Bars.OpenTimes.Last(1),
-                            EntryPrice = entryPrice,
+                            EntryTriggerTime = Bars.OpenTimes.Last(1), // Time of the bar that confirmed LS
+                            EntryPrice = specificEntryPrice,
                             EntryLS = bearishEntryLS
                         };
                         entryTriggerFound = true;

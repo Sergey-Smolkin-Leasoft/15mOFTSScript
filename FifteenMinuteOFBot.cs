@@ -109,11 +109,6 @@ namespace cAlgo.Robots
         [Parameter("Max Armed Duration (Bars)", DefaultValue = 10, MinValue = 1, MaxValue = 50, Group = "Strategy")]
         public int MaxArmedDurationBars { get; set; }
 
-        // Session times are now hardcoded as per user request
-        // Frankfurt: 06:00-07:00 UTC
-        // London:    07:00-12:00 UTC
-        // New York:  12:00-20:00 UTC
-
         // Internal state variables
         private string _currentD1Context = "Initializing...";
         private DateTime _lastD1ContextUpdateDate = DateTime.MinValue;

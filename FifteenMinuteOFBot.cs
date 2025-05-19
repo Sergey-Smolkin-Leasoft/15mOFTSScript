@@ -91,17 +91,30 @@ namespace cAlgo.Robots
         [Parameter("Trade Label", DefaultValue = "15mOF", Group = "Strategy")]
         public string TradeLabel { get; set; }
 
+        [Parameter("SL Offset (Ticks)", DefaultValue = 15, MinValue = 1, Group = "Strategy")]
+        public int StopLossOffsetTicks { get; set; }
+
         // Internal state variables
         private string _currentD1Context = "Initializing...";
-        private MarketSeries _d1Series;
-        private MarketSeries _h1Series; // For H1 fractals
+        private DateTime _lastD1ContextUpdateDate = DateTime.MinValue;
+
+        private Bars _d1Bars;
+        private Bars _h1Bars; 
 
         protected override void OnStart()
         {
             Print("FifteenMinuteOFBot started.");
             Print($"Bot running on: {SymbolName} {TimeFrame}");
+            Print($"---- Symbol Info ----");
+            Print($"Digits: {Symbol.Digits}");
+            Print($"PipSize (from API): {Symbol.PipSize}"); // Log API's PipSize
+            Print($"PipValue: {Symbol.PipValue}");
+            Print($"TickSize: {Symbol.TickSize}");
+            Print($"TickValue: {Symbol.TickValue}");
+            Print($"LotSize (Units): {Symbol.LotSize}");
+            Print($"---------------------");
             Print($"D1 Context: Days={D1DaysForContext}, Min%Change={D1PercentageChangeForContext}");
-            Print($"Strategy: Risk={RiskPercentPerTrade}%, MinRR={MinRR}, MaxRR={MaxRR}, Label='{TradeLabel}'");
+            Print($"Strategy: Risk={RiskPercentPerTrade}%, SL Offset Ticks={StopLossOffsetTicks}, Label='{TradeLabel}' (Using Fixed RR=2.0)");
             Print($"LS Params: Lookback={LSLookbackBars}, DetectionWindow={LSDetectionWindowBars}");
             Print($"FVG Params: Lookback={FVGLookbackBars}, TestWindow={FVGTestWindowBars}");
             Print($"Fractal Params: Lookback={FractalLookbackBars}");
@@ -110,21 +123,22 @@ namespace cAlgo.Robots
             {
                 Print("WARNING: This bot is designed for the M15 timeframe. Please apply it to an M15 chart.");
             }
-
-            _d1Series = MarketData.GetSeries(TimeFrame.Daily);
-            _h1Series = MarketData.GetSeries(TimeFrame.Hour); // Corrected to TimeFrame.Hour
+            
+            _d1Bars = MarketData.GetBars(TimeFrame.Daily);
+            _h1Bars = MarketData.GetBars(TimeFrame.Hour); 
             DetermineD1Context(); // Initial D1 context
+            _lastD1ContextUpdateDate = _d1Bars.OpenTimes.LastValue.Date; // Store date of initial context update
         }
 
         protected override void OnBar()
         {
-            // It's often better to determine D1 context less frequently than every 15m bar, 
-            // for example, only once per day or when a new D1 bar forms.
-            // For simplicity now, we'll re-evaluate on each 15m bar if the D1 bar might have changed.
-            if (_d1Series.OpenTime.LastValue.Date < Bars.OpenTimes.LastValue.Date || _currentD1Context == "Initializing...")
+            // Determine D1 context only once per new D1 bar or on initial run
+            bool newD1BarFormed = _d1Bars.OpenTimes.LastValue.Date > _lastD1ContextUpdateDate;
+            if (newD1BarFormed || _currentD1Context == "Initializing...")
             {
-                 Print("New D1 bar potentially formed or initial run, re-evaluating D1 context...");
+                 Print("New D1 bar formed or initial run, re-evaluating D1 context...");
                  DetermineD1Context();
+                 _lastD1ContextUpdateDate = _d1Bars.OpenTimes.LastValue.Date;
             }
 
             // Main strategy logic will go here, gated by _currentD1Context
@@ -135,14 +149,13 @@ namespace cAlgo.Robots
                 List<FVGInfo> m15fvgs = FindFVGs(Bars, FVGLookbackBars);
                 List<LiquiditySweepInfo> m15sweeps = FindLiquiditySweeps(Bars);
                 List<FractalInfo> m15Fractals = FindFractals(Bars, TimeFrame.Minute15, FractalLookbackBars);
-                List<FractalInfo> h1Fractals = FindFractals(_h1Series, TimeFrame.Hour, FractalLookbackBars); // Corrected to TimeFrame.Hour
-                // LogFractals(m15Fractals, "M15");
-                // LogFractals(h1Fractals, "H1");
+                List<FractalInfo> h1Fractals = FindFractals(_h1Bars, TimeFrame.Hour, FractalLookbackBars); 
                 // Mark FVG as tested
                 foreach(var fvg in m15fvgs) { CheckAndMarkFVGTest(fvg, Bars, FVGTestWindowBars); }
 
                 List<SetupInfo> setups = CheckForSetups(m15sweeps, m15fvgs, m15Fractals, h1Fractals, _currentD1Context);
                 // Process setups
+                ProcessSetups(setups);
             }
             else if (_currentD1Context == "Downtrend")
             {
@@ -151,14 +164,13 @@ namespace cAlgo.Robots
                 List<FVGInfo> m15fvgs = FindFVGs(Bars, FVGLookbackBars);
                 List<LiquiditySweepInfo> m15sweeps = FindLiquiditySweeps(Bars);
                 List<FractalInfo> m15Fractals = FindFractals(Bars, TimeFrame.Minute15, FractalLookbackBars);
-                List<FractalInfo> h1Fractals = FindFractals(_h1Series, TimeFrame.Hour, FractalLookbackBars); // Corrected to TimeFrame.Hour
-                // LogFractals(m15Fractals, "M15");
-                // LogFractals(h1Fractals, "H1");
+                List<FractalInfo> h1Fractals = FindFractals(_h1Bars, TimeFrame.Hour, FractalLookbackBars); 
                 // Mark FVG as tested
                 foreach(var fvg in m15fvgs) { CheckAndMarkFVGTest(fvg, Bars, FVGTestWindowBars); }
 
                 List<SetupInfo> setups = CheckForSetups(m15sweeps, m15fvgs, m15Fractals, h1Fractals, _currentD1Context);
                 // Process setups
+                ProcessSetups(setups);
             }
             else
             {
@@ -168,26 +180,28 @@ namespace cAlgo.Robots
 
         private void DetermineD1Context()
         {
-            if (_d1Series.Close.Count <= D1DaysForContext + 1) // Use .Close for MarketSeries
+            if (_d1Bars.ClosePrices.Count <= D1DaysForContext) // Adjusted condition
             {
-                Print($"Not enough D1 historical data. Need {D1DaysForContext + 2} bars, have {_d1Series.Close.Count}. D1 Context: Insufficient Data");
+                Print($"Not enough D1 historical data. Need more than {D1DaysForContext} bars, have {_d1Bars.ClosePrices.Count}. D1 Context: Insufficient Data");
                 _currentD1Context = "Insufficient Data";
                 return;
             }
 
-            // D1 context is based on a bar that has ALREADY CLOSED.
-            // If today's D1 bar is Bar[0] in _d1Series (current, forming bar), 
-            // then Bar[1] is yesterday's closed bar.
-            double mostRecentD1Close = _d1Series.Close.Last(1); // Yesterday's close
-            int pastD1BarIndex = 1 + D1DaysForContext; // e.g., if D1DaysForContext=3, this is 1+3=4, so 4 D1 bars before yesterday's close
+            // Use the close of the very last available D1 bar as the most recent reference point
+            double mostRecentD1Close = _d1Bars.ClosePrices.LastValue; 
+            DateTime mostRecentD1OpenTime = _d1Bars.OpenTimes.LastValue;
+
+            int pastD1BarIndex = D1DaysForContext; // Index for Last(X) relative to the end of the series
             
-            if (_d1Series.Close.Count <= pastD1BarIndex) // Ensure pastD1BarIndex is valid
+            // Ensure the pastD1BarIndex is valid (e.g., if D1DaysForContext is 0, Last(0) is not what we want for a *past* bar)
+            if (pastD1BarIndex < 1 || _d1Bars.ClosePrices.Count <= pastD1BarIndex) 
             {
-                 Print($"Not enough D1 historical data for past bar. Need index {pastD1BarIndex}, have count {_d1Series.Close.Count}. D1 Context: Insufficient Data");
-                _currentD1Context = "Insufficient Data";
+                 Print($"Invalid D1DaysForContext ({D1DaysForContext}) or not enough D1 data for past bar. Count: {_d1Bars.ClosePrices.Count}. D1 Context: Insufficient Data for Past Bar");
+                _currentD1Context = "Insufficient Data for Past Bar";
                 return;
             }
-            double pastD1Close = _d1Series.Close.Last(pastD1BarIndex);
+            double pastD1Close = _d1Bars.ClosePrices.Last(pastD1BarIndex);
+            DateTime pastD1OpenTime = _d1Bars.OpenTimes.Last(pastD1BarIndex);
 
             if (pastD1Close == 0)
             {
@@ -217,7 +231,7 @@ namespace cAlgo.Robots
             {
                 _currentD1Context = determinedContext;
                 Print($"D1 Market Context Updated: {_currentD1Context}. Change: {percentageChange:F2}% over last {D1DaysForContext} D1 bar(s).");
-                Print($"  D1 Calc: Recent Close {_d1Series.OpenTime.Last(1):yyyy-MM-dd} ({mostRecentD1Close.ToString("F" + Symbol.Digits)}) vs Past Close {_d1Series.OpenTime.Last(pastD1BarIndex):yyyy-MM-dd} ({pastD1Close.ToString("F" + Symbol.Digits)})");
+                Print($"  D1 Calc: Recent Close {mostRecentD1OpenTime:yyyy-MM-dd} ({mostRecentD1Close.ToString("F" + Symbol.Digits)}) vs Past Close {pastD1OpenTime:yyyy-MM-dd} ({pastD1Close.ToString("F" + Symbol.Digits)})");
             }
         }
         
@@ -241,18 +255,49 @@ namespace cAlgo.Robots
         // Placeholder for Position Size Calculation
         private double CalculatePositionVolume(double stopLossPrice, double entryPrice)
         {
-            double stopLossPips = Math.Abs(entryPrice - stopLossPrice) / Symbol.PipSize;
-            if (stopLossPips == 0) return 0;
+            // Define our strategic pip for risk calculation (e.g., 10 ticks)
+            // This MUST match the definition in TryFinalizeSetupWithRule3 if used there for validation
+            double strategicPipSize = 10 * Symbol.TickSize; 
+            if (strategicPipSize == 0) strategicPipSize = Symbol.TickSize; // Fallback
 
-            double riskAmount = Account.Equity * (RiskPercentPerTrade / 100.0);
-            double valuePerPipPerUnit = Symbol.PipValue; // Value of 1 pip for 1 unit in account currency
+            double stopDistanceInPrice = Math.Abs(entryPrice - stopLossPrice);
+            if (stopDistanceInPrice == 0 || strategicPipSize == 0) 
+            {
+                Print("Error in CalculatePositionVolume: stop distance or strategicPipSize is zero.");
+                return 0;
+            }
+
+            double stopLossInStrategicPips = stopDistanceInPrice / strategicPipSize;
             
-            double volumeInUnits = riskAmount / (stopLossPips * valuePerPipPerUnit);
-            if (double.IsInfinity(volumeInUnits) || double.IsNaN(volumeInUnits) || volumeInUnits <=0) return 0;
+            double riskAmount = Account.Equity * (RiskPercentPerTrade / 100.0);
+            
+            // PipValue here should ideally be for our strategic pip.
+            // Symbol.PipValue is for API's PipSize. If API PipSize = 1 and our strategicPipSize = 0.1 (10 ticks),
+            // then value of our strategic pip is Symbol.PipValue / (Symbol.PipSize / strategicPipSize)
+            // = Symbol.PipValue * strategicPipSize / Symbol.PipSize
+            double valuePerStrategicPipPerUnit = Symbol.TickValue * 10; // Since our strategic pip is 10 ticks
+            if (Symbol.PipSize != 0 && strategicPipSize != Symbol.PipSize) // Adjust if API's PipValue is based on a different PipSize
+            {
+                // This is a more robust calculation for value of our strategic pip if API's PipValue is reliable
+                // valuePerStrategicPipPerUnit = Symbol.PipValue * (strategicPipSize / Symbol.PipSize);
+                // However, since PipValue itself seems tied to the faulty PipSize=1, let's stick to TickValue based calc.
+            }
+            if (valuePerStrategicPipPerUnit == 0) 
+            {
+                Print("Error in CalculatePositionVolume: valuePerStrategicPipPerUnit is zero.");
+                return 0;
+            }
+            
+            double volumeInUnits = riskAmount / (stopLossInStrategicPips * valuePerStrategicPipPerUnit);
+            if (double.IsInfinity(volumeInUnits) || double.IsNaN(volumeInUnits) || volumeInUnits <=0) 
+            {
+                 Print($"Error in CalculatePositionVolume: volumeInUnits is invalid ({volumeInUnits}). RiskAmount: {riskAmount}, SLStrategicPips: {stopLossInStrategicPips}, ValPerStratPipUnit: {valuePerStrategicPipPerUnit}");
+                return 0;
+            }
 
             // Normalize this volume in units to lots, then to actual tradeable units
             double targetLots = volumeInUnits / Symbol.LotSize;
-            double normalizedLots = Symbol.NormalizeVolumeInUnits(targetLots, RoundingMode.Down);
+            double normalizedLots = Symbol.NormalizeVolumeInUnits(targetLots, RoundingMode.Down); // Using Symbol.LotSize for units per lot
 
             if (normalizedLots == 0) 
             {
@@ -408,63 +453,6 @@ namespace cAlgo.Robots
         }
 
         // Function to find 3-bar Fractals
-        private List<FractalInfo> FindFractals(MarketSeries series, TimeFrame tf, int lookbackBars)
-        {
-            var fractals = new List<FractalInfo>();
-            // We need 3 bars for a fractal. Index 0 is current forming, 1 is last closed.
-            // Middle bar of fractal can be series.Last(1), then prev=Last(2), next=Last(0) (but Last(0) is current, use current bar properties)
-            // Or, middle bar is series.Last(i), prev=Last(i+1), next=Last(i-1)
-            // We need at least 3 closed bars in the series to check the most recent possible fractal (middle bar = series.Last(2))
-            if (series.Close.Count < Math.Max(lookbackBars, 3))
-            {
-                return fractals;
-            }
-
-            // Iterate for the middle bar of the 3-bar fractal pattern
-            // bar_idx is the index from the end (1 = last closed bar, 2 = one before last closed etc.)
-            // The fractal pattern is: Prev Bar (idx+1) - Middle Bar (idx) - Next Bar (idx-1)
-            // We need to ensure idx-1 is at least 1 for closed bars, so idx_min = 2.
-            for (int bar_idx = 2; bar_idx <= Math.Min(lookbackBars, series.Close.Count -1 ); bar_idx++)
-            {
-                double prevHigh = series.High.Last(bar_idx + 1);
-                double prevLow = series.Low.Last(bar_idx + 1);
-                
-                double middleHigh = series.High.Last(bar_idx);
-                double middleLow = series.Low.Last(bar_idx);
-                DateTime middleTime = series.OpenTime.Last(bar_idx);
-                
-                double nextHigh = series.High.Last(bar_idx - 1);
-                double nextLow = series.Low.Last(bar_idx - 1);
-
-                // Check for High Fractal (Bearish)
-                if (middleHigh > prevHigh && middleHigh > nextHigh)
-                {
-                    fractals.Add(new FractalInfo
-                    {
-                        Time = middleTime,
-                        Price = middleHigh,
-                        IsHighFractal = true,
-                        SourceBarIndex = bar_idx,
-                        TF = tf
-                    });
-                }
-                // Check for Low Fractal (Bullish)
-                else if (middleLow < prevLow && middleLow < nextLow)
-                {
-                    fractals.Add(new FractalInfo
-                    {
-                        Time = middleTime,
-                        Price = middleLow,
-                        IsHighFractal = false,
-                        SourceBarIndex = bar_idx,
-                        TF = tf
-                    });
-                }
-            }
-            return fractals.OrderByDescending(f => f.SourceBarIndex).ToList(); // Freshest first
-        }
-        
-        // Overload FindFractals for Bars (current timeframe M15)
         private List<FractalInfo> FindFractals(Bars series, TimeFrame tf, int lookbackBars)
         {
             var fractals = new List<FractalInfo>();
@@ -716,16 +704,206 @@ namespace cAlgo.Robots
                 }
             }
             
-            // TODO: Filter/sort setups if multiple are found for the same bar or overlapping signals.
-            // For now, just return all found. Later, we might pick the "best" or first one.
-            // Also, Rule 3 (TP/RR check) will further validate these.
-
-            if (validSetups.Any())
+            // Filter setups by Rule 3 (TP/RR) and finalize valid ones
+            var finalizedSetups = new List<SetupInfo>();
+            foreach (var potentialSetup in validSetups)
             {
-                Print($"Found {validSetups.Count} potential setups for D1: {d1Context}.");
-                // foreach(var s in validSetups) { Print($"  - {s.Rule2Pattern} at {s.SignalTime}"); }
+                if (TryFinalizeSetupWithRule3(potentialSetup, m15Fractals, h1Fractals))
+                {
+                    finalizedSetups.Add(potentialSetup);
+                }
             }
-            return validSetups;
+
+            if (finalizedSetups.Any())
+            {
+                Print($"Found {finalizedSetups.Count} finalized setups for D1: {d1Context}.");
+                // foreach(var s in finalizedSetups) { Print($"  - {s.Rule2Pattern} at {s.SignalTime}, Entry: {s.EntryPrice}, SL: {s.StopLossPrice}, TP: {s.TakeProfitTargetPrice}, RR: {s.RiskRewardRatio:F2}"); }
+            }
+            return finalizedSetups;
+        }
+
+        private bool TryFinalizeSetupWithRule3(SetupInfo setup, List<FractalInfo> m15Fractals, List<FractalInfo> h1Fractals)
+        {
+            double entryPrice = 0;
+            double stopLossPrice = 0;
+            double minStopLossPips = 1.0; // Minimum pips for stop loss to be valid
+
+            // Determine Entry Price based on the trigger of the Rule 2 pattern
+            // And determine the base price level from which SL will be calculated
+            double slBasePrice = 0;
+            string slReason = "";
+
+            if (setup.Rule2Pattern == "LS+LS" && setup.SecondaryLS != null)
+            {
+                if (setup.SecondaryLS.ConfirmationBarIndex < 1 || setup.SecondaryLS.ConfirmationBarIndex > Bars.Count) return false;
+                entryPrice = Bars.ClosePrices.Last(setup.SecondaryLS.ConfirmationBarIndex);
+                slBasePrice = setup.IsBullish ? setup.SecondaryLS.WickLow : setup.SecondaryLS.WickHigh;
+                slReason = setup.IsBullish ? "SecondaryLS.WickLow" : "SecondaryLS.WickHigh";
+            }
+            else if (setup.Rule2Pattern == "LS+FVGTest" && setup.PrimaryFVGTest != null)
+            {
+                if (setup.PrimaryFVGTest.TestBarIndex < 1 || setup.PrimaryFVGTest.TestBarIndex > Bars.Count) return false;
+                entryPrice = Bars.ClosePrices.Last(setup.PrimaryFVGTest.TestBarIndex);
+                slBasePrice = setup.IsBullish ? setup.PrimaryFVGTest.Bottom : setup.PrimaryFVGTest.Top;
+                slReason = setup.IsBullish ? "PrimaryFVGTest.Bottom" : "PrimaryFVGTest.Top";
+            }
+            else if (setup.Rule2Pattern == "FVGTest+FVGTest" && setup.SecondaryFVGTest != null)
+            {
+                if (setup.SecondaryFVGTest.TestBarIndex < 1 || setup.SecondaryFVGTest.TestBarIndex > Bars.Count) return false;
+                entryPrice = Bars.ClosePrices.Last(setup.SecondaryFVGTest.TestBarIndex);
+                slBasePrice = setup.IsBullish ? setup.SecondaryFVGTest.Bottom : setup.SecondaryFVGTest.Top;
+                slReason = setup.IsBullish ? "SecondaryFVGTest.Bottom" : "SecondaryFVGTest.Top";
+            }
+            else
+            {
+                Print($"Error: Setup has unknown Rule2Pattern '{setup.Rule2Pattern}' or missing components.");
+                return false; 
+            }
+
+            if (entryPrice == 0) 
+            {
+                Print("Error: Entry price is zero.");
+                return false;
+            }
+            // Sanity check for slBasePrice - it should be reasonably close to entryPrice
+            // If slBasePrice is less than 50% of entry price, or more than 150% (roughly), it's likely absurd for this strategy
+            if (slBasePrice < entryPrice * 0.5 || slBasePrice > entryPrice * 1.5 || slBasePrice <=0) 
+            {
+                Print($"Setup invalidated: SL base price ({slBasePrice.ToString("F" + Symbol.Digits)} from {slReason}) is absurd relative to entry price ({entryPrice.ToString("F" + Symbol.Digits)}). TickSize: {Symbol.TickSize}");
+                setup.IsValid = false;
+                return false;
+            }
+
+            // Calculate actual stopLossPrice using TickSize
+            stopLossPrice = setup.IsBullish ? (slBasePrice - StopLossOffsetTicks * Symbol.TickSize) : (slBasePrice + StopLossOffsetTicks * Symbol.TickSize);
+            Print($"Debug SL Calc: Entry={entryPrice.ToString("F" + Symbol.Digits)}, SLBase={slBasePrice.ToString("F" + Symbol.Digits)} ({slReason}), SLOffsetTicks={StopLossOffsetTicks}, TickSize={Symbol.TickSize}, Calculated SL={stopLossPrice.ToString("F" + Symbol.Digits)}");
+
+            // Define our strategic pip for risk calculation (e.g., 10 ticks)
+            double strategicPipSize = 10 * Symbol.TickSize; 
+            if (strategicPipSize == 0) strategicPipSize = Symbol.TickSize; // Fallback if 10*TickSize is zero somehow
+
+            double stopLossInStrategicPips = Math.Abs(entryPrice - stopLossPrice) / strategicPipSize;
+            if (stopLossInStrategicPips < (minStopLossPips * Symbol.PipSize / strategicPipSize) && Symbol.PipSize > 0 && strategicPipSize > 0) // Heuristic to convert minStopLossPips (which was based on faulty PipSize) to new strategic pips
+            {
+                 Print($"Setup invalidated: SL (in strategic pips) {stopLossInStrategicPips:F2} too small for {setup.Rule2Pattern} at {setup.SignalTime}. Entry: {entryPrice}, SL: {stopLossPrice}");
+                setup.IsValid = false;
+                return false;
+            }
+
+            setup.EntryPrice = entryPrice;
+            setup.StopLossPrice = stopLossPrice;
+
+            // --- Logic for Fixed RR Take Profit ---
+            double riskDistance = Math.Abs(entryPrice - stopLossPrice);
+            
+            // Ensure riskDistance is meaningful (e.g., not smaller than pipsize, though stopLossPips check should cover most cases)
+            if (riskDistance < Symbol.PipSize / 2) // Check if risk distance is extremely small
+            {
+                Print($"Setup invalidated (Fixed RR): Risk distance {riskDistance} is too small. Entry: {entryPrice}, SL: {stopLossPrice}");
+                setup.IsValid = false;
+                return false;
+            }
+
+            double fixedRR = 2.0;
+            double rewardDistance = riskDistance * fixedRR;
+            double calculatedTpPrice;
+
+            if (setup.IsBullish)
+            {
+                calculatedTpPrice = entryPrice + rewardDistance;
+            }
+            else // Bearish
+            {
+                calculatedTpPrice = entryPrice - rewardDistance;
+            }
+
+            setup.TakeProfitTargetPrice = calculatedTpPrice;
+            setup.RiskRewardRatio = fixedRR;
+            setup.TakeProfitFractal = null; // Not using fractal for TP anymore
+
+            double calculatedVolume = CalculatePositionVolume(stopLossPrice, entryPrice);
+            if (calculatedVolume > 0)
+            {
+                setup.CalculatedVolumeInUnits = calculatedVolume;
+                setup.IsValid = true;
+                Print($"Validated Setup (Fixed RR): {setup.Rule2Pattern} at {setup.SignalTime}, Entry: {setup.EntryPrice.ToString("F" + Symbol.Digits)}, SL: {setup.StopLossPrice.ToString("F" + Symbol.Digits)}, TP: {setup.TakeProfitTargetPrice.ToString("F" + Symbol.Digits)}, RR: {setup.RiskRewardRatio:F2}, VolLots: {Symbol.VolumeInUnitsToQuantity(calculatedVolume)}");
+                return true;
+            }
+            else
+            {
+                Print($"Setup invalidated (Fixed RR): Calculated volume is 0 for {setup.Rule2Pattern} at {setup.SignalTime}. TP: {setup.TakeProfitTargetPrice.ToString("F" + Symbol.Digits)}, RR: {fixedRR:F2}");
+                setup.IsValid = false;
+                return false;
+            }
+            // --- End of Fixed RR Take Profit logic ---
+        }
+
+        private void ProcessSetups(List<SetupInfo> setups)
+        {
+            if (!setups.Any()) return;
+
+            // Check if there are already positions with this label
+            var existingPosition = Positions.FirstOrDefault(p => p.Label == TradeLabel && p.SymbolName == SymbolName);
+            if (existingPosition != null)
+            {
+                // Print("A position with this label already exists. No new trade will be opened.");
+                return;
+            }
+
+            // Take the first valid setup found (could be more sophisticated later, e.g. best RR)
+            SetupInfo setupToTrade = setups.FirstOrDefault(s => s.IsValid);
+
+            if (setupToTrade != null)
+            {
+                TradeType tradeType = setupToTrade.IsBullish ? TradeType.Buy : TradeType.Sell;
+                double volumeInUnits = setupToTrade.CalculatedVolumeInUnits;
+                string symbolName = SymbolName;
+                double entry = setupToTrade.EntryPrice; // For market order, this is indicative
+                double stopLoss = setupToTrade.StopLossPrice;
+                double takeProfit = setupToTrade.TakeProfitTargetPrice;
+
+                // Normalize prices before execution (manual approach)
+                double normalizedStopLoss = Math.Round(stopLoss, Symbol.Digits); 
+                double normalizedTakeProfit = Math.Round(takeProfit, Symbol.Digits); 
+
+                Print($"Attempting to open {tradeType} trade for {SymbolName} based on {setupToTrade.Rule2Pattern}.");
+                Print($"  Signal Time: {setupToTrade.SignalTime}");
+                Print($"  Entry (indicative): {entry.ToString("F" + Symbol.Digits)}");
+                Print($"  Stop Loss (calculated): {stopLoss.ToString("F" + Symbol.Digits)}, Normalized SL: {normalizedStopLoss.ToString("F" + Symbol.Digits)}");
+                Print($"  Take Profit (calculated): {takeProfit.ToString("F" + Symbol.Digits)}, Normalized TP: {normalizedTakeProfit.ToString("F" + Symbol.Digits)}");
+                
+                string tpFractalTFStr = setupToTrade.TakeProfitFractal == null ? "N/A" : setupToTrade.TakeProfitFractal.TF.ToString();
+                string tpFractalTimeStr = setupToTrade.TakeProfitFractal == null ? "N/A" : setupToTrade.TakeProfitFractal.Time.ToString();
+                Print($"  Take Profit: {takeProfit.ToString("F" + Symbol.Digits)} (Fractal on {tpFractalTFStr} at {tpFractalTimeStr})");
+                
+                Print($"  Volume (Units): {volumeInUnits}");
+                Print($"  Volume (Lots): {Symbol.VolumeInUnitsToQuantity(volumeInUnits)}");
+                Print($"  Risk/Reward: {setupToTrade.RiskRewardRatio:F2}");
+
+                // Execute order without SL/TP first
+                var result = ExecuteMarketOrder(tradeType, symbolName, volumeInUnits, TradeLabel, null, null);
+
+                if (result.IsSuccessful)
+                {
+                    Print($"Market Order Sent: {tradeType} {Symbol.VolumeInUnitsToQuantity(volumeInUnits)} lots of {SymbolName}. Position ID: {result.Position.Id}");
+                    Position position = result.Position;
+                    var modifyResult = ModifyPosition(position, normalizedStopLoss, normalizedTakeProfit);
+                    if (modifyResult.IsSuccessful)
+                    {
+                        Print($"Position Modified: SL set to {normalizedStopLoss.ToString("F" + Symbol.Digits)}, TP set to {normalizedTakeProfit.ToString("F" + Symbol.Digits)}");
+                        // Log the actual SL/TP from the position object after modification, if available and different
+                        Print($"Trade Confirmed: Entry at {position.EntryPrice.ToString("F" + Symbol.Digits)}. SL Actual: {position.StopLoss?.ToString("F" + Symbol.Digits) ?? "N/A"}, TP Actual: {position.TakeProfit?.ToString("F" + Symbol.Digits) ?? "N/A"}");
+                    }
+                    else
+                    {
+                        Print($"Error modifying position {position.Id} to set SL/TP: {modifyResult.Error}");
+                    }
+                }
+                else
+                {
+                    Print($"Error opening trade: {result.Error}");
+                }
+            }
         }
     }
 } 

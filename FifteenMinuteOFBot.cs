@@ -1124,8 +1124,7 @@ namespace cAlgo.Robots
             else
             {
                 Print($"Error opening trade: {result.Error}");
-                }
             }
         }
     }
-} 
+}

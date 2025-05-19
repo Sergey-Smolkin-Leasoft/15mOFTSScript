@@ -94,6 +94,11 @@ namespace cAlgo.Robots
         [Parameter("SL Offset (Ticks)", DefaultValue = 15, MinValue = 1, Group = "Strategy")]
         public int StopLossOffsetTicks { get; set; }
 
+        // Session times are now hardcoded as per user request
+        // Frankfurt: 06:00-07:00 UTC
+        // London:    07:00-12:00 UTC
+        // New York:  12:00-20:00 UTC
+
         // Internal state variables
         private string _currentD1Context = "Initializing...";
         private DateTime _lastD1ContextUpdateDate = DateTime.MinValue;
@@ -134,6 +139,14 @@ namespace cAlgo.Robots
         {
             // Determine D1 context only once per new D1 bar or on initial run
             bool newD1BarFormed = _d1Bars.OpenTimes.LastValue.Date > _lastD1ContextUpdateDate;
+
+            if (!IsTradingSessionActive())
+            {
+                // Optional: Print log only if it changes state or periodically
+                // Print("Trading session is not active. Skipping strategy logic.");
+                return;
+            }
+
             if (newD1BarFormed || _currentD1Context == "Initializing...")
             {
                  Print("New D1 bar formed or initial run, re-evaluating D1 context...");
@@ -533,6 +546,29 @@ namespace cAlgo.Robots
             Print("FifteenMinuteOFBot stopped.");
         }
 
+        private bool IsTradingSessionActive()
+        {
+            // ServerTime is already UTC
+            int currentHourUTC = Server.Time.Hour;
+
+            // Frankfurt: 06:00-07:00 UTC (exclusive of end hour)
+            if (currentHourUTC >= 6 && currentHourUTC < 7)
+            {
+                return true;
+            }
+            // London: 07:00-12:00 UTC (exclusive of end hour)
+            if (currentHourUTC >= 7 && currentHourUTC < 12)
+            {
+                return true;
+            }
+            // New York: 12:00-20:00 UTC (exclusive of end hour)
+            if (currentHourUTC >= 12 && currentHourUTC < 20)
+            {
+                return true;
+            }
+            return false;
+        }
+
         // Class to hold information about a potential trading setup
         public class SetupInfo
         {
@@ -545,7 +581,6 @@ namespace cAlgo.Robots
             public LiquiditySweepInfo SecondaryLS { get; set; } 
             public FVGInfo PrimaryFVGTest { get; set; } 
             public FVGInfo SecondaryFVGTest { get; set; } 
-            public LiquiditySweepInfo PrecedingLSForRule1 { get; set; } // For FVGTest+FVGTest pattern, stores the LS that satisfies Rule 1
 
             // Entry, SL, TP details
             public double EntryPrice { get; set; }
@@ -691,7 +726,7 @@ namespace cAlgo.Robots
                                 {
                                     Rule2Pattern = "FVGTest+FVGTest",
                                     SignalTime = fvg2TestBarTime,
-                                    PrecedingLSForRule1 = precedingLS,
+                                    PrimaryLS = precedingLS, // Rule 1 LS
                                     PrimaryFVGTest = fvg1_tested,
                                     SecondaryFVGTest = fvg2_tested,
                                     IsValid = true 
@@ -726,7 +761,7 @@ namespace cAlgo.Robots
         {
             double entryPrice = 0;
             double stopLossPrice = 0;
-            double minStopLossPips = 1.0; // Minimum pips for stop loss to be valid
+            double minStopLossPipsParamValue = 1.0; // This was the old minStopLossPips, used for threshold calc
 
             // Determine Entry Price based on the trigger of the Rule 2 pattern
             // And determine the base price level from which SL will be calculated
@@ -744,48 +779,72 @@ namespace cAlgo.Robots
             {
                 if (setup.PrimaryFVGTest.TestBarIndex < 1 || setup.PrimaryFVGTest.TestBarIndex > Bars.Count) return false;
                 entryPrice = Bars.ClosePrices.Last(setup.PrimaryFVGTest.TestBarIndex);
-                slBasePrice = setup.IsBullish ? setup.PrimaryFVGTest.Bottom : setup.PrimaryFVGTest.Top;
-                slReason = setup.IsBullish ? "PrimaryFVGTest.Bottom" : "PrimaryFVGTest.Top";
+                // For SL, use the Low/High of the bar that tested the FVG
+                slBasePrice = setup.IsBullish ? Bars.LowPrices.Last(setup.PrimaryFVGTest.TestBarIndex) : Bars.HighPrices.Last(setup.PrimaryFVGTest.TestBarIndex);
+                slReason = setup.IsBullish ? $"Low of FVG Test Bar (idx {setup.PrimaryFVGTest.TestBarIndex})" : $"High of FVG Test Bar (idx {setup.PrimaryFVGTest.TestBarIndex})";
             }
             else if (setup.Rule2Pattern == "FVGTest+FVGTest" && setup.SecondaryFVGTest != null)
             {
                 if (setup.SecondaryFVGTest.TestBarIndex < 1 || setup.SecondaryFVGTest.TestBarIndex > Bars.Count) return false;
                 entryPrice = Bars.ClosePrices.Last(setup.SecondaryFVGTest.TestBarIndex);
-                slBasePrice = setup.IsBullish ? setup.SecondaryFVGTest.Bottom : setup.SecondaryFVGTest.Top;
-                slReason = setup.IsBullish ? "SecondaryFVGTest.Bottom" : "SecondaryFVGTest.Top";
+                // For SL, use the Low/High of the bar that tested the second FVG
+                slBasePrice = setup.IsBullish ? Bars.LowPrices.Last(setup.SecondaryFVGTest.TestBarIndex) : Bars.HighPrices.Last(setup.SecondaryFVGTest.TestBarIndex);
+                slReason = setup.IsBullish ? $"Low of Second FVG Test Bar (idx {setup.SecondaryFVGTest.TestBarIndex})" : $"High of Second FVG Test Bar (idx {setup.SecondaryFVGTest.TestBarIndex})";
             }
             else
             {
-                Print($"Error: Setup has unknown Rule2Pattern '{setup.Rule2Pattern}' or missing components.");
+                Print($"Error: Setup has unknown Rule2Pattern '{setup.Rule2Pattern}' or missing components for SL/Entry.");
                 return false; 
             }
 
             if (entryPrice == 0) 
             {
-                Print("Error: Entry price is zero.");
+                Print("Error: Entry price is zero after pattern evaluation.");
                 return false;
             }
-            // Sanity check for slBasePrice - it should be reasonably close to entryPrice
-            // If slBasePrice is less than 50% of entry price, or more than 150% (roughly), it's likely absurd for this strategy
-            if (slBasePrice < entryPrice * 0.5 || slBasePrice > entryPrice * 1.5 || slBasePrice <=0) 
+            
+            if (slBasePrice <= 0 || (slBasePrice < entryPrice * 0.5 && entryPrice > 0) || (slBasePrice > entryPrice * 1.5 && entryPrice > 0) )
             {
-                Print($"Setup invalidated: SL base price ({slBasePrice.ToString("F" + Symbol.Digits)} from {slReason}) is absurd relative to entry price ({entryPrice.ToString("F" + Symbol.Digits)}). TickSize: {Symbol.TickSize}");
+                Print($"Setup invalidated: SL base price ({slBasePrice.ToString("F" + Symbol.Digits)} from {slReason}) is zero, negative or absurd relative to entry price ({entryPrice.ToString("F" + Symbol.Digits)}).");
                 setup.IsValid = false;
                 return false;
             }
 
-            // Calculate actual stopLossPrice using TickSize
-            stopLossPrice = setup.IsBullish ? (slBasePrice - StopLossOffsetTicks * Symbol.TickSize) : (slBasePrice + StopLossOffsetTicks * Symbol.TickSize);
-            Print($"Debug SL Calc: Entry={entryPrice.ToString("F" + Symbol.Digits)}, SLBase={slBasePrice.ToString("F" + Symbol.Digits)} ({slReason}), SLOffsetTicks={StopLossOffsetTicks}, TickSize={Symbol.TickSize}, Calculated SL={stopLossPrice.ToString("F" + Symbol.Digits)}");
-
-            // Define our strategic pip for risk calculation (e.g., 10 ticks)
-            double strategicPipSize = 10 * Symbol.TickSize; 
-            if (strategicPipSize == 0) strategicPipSize = Symbol.TickSize; // Fallback if 10*TickSize is zero somehow
-
-            double stopLossInStrategicPips = Math.Abs(entryPrice - stopLossPrice) / strategicPipSize;
-            if (stopLossInStrategicPips < (minStopLossPips * Symbol.PipSize / strategicPipSize) && Symbol.PipSize > 0 && strategicPipSize > 0) // Heuristic to convert minStopLossPips (which was based on faulty PipSize) to new strategic pips
+            stopLossPrice = setup.IsBullish 
+                ? (slBasePrice - StopLossOffsetTicks * Symbol.TickSize) 
+                : (slBasePrice + StopLossOffsetTicks * Symbol.TickSize);
+            
+            // Ensure SL is not on the wrong side of entry or exactly at entry
+            if ((setup.IsBullish && stopLossPrice >= entryPrice) || (!setup.IsBullish && stopLossPrice <= entryPrice))
             {
-                 Print($"Setup invalidated: SL (in strategic pips) {stopLossInStrategicPips:F2} too small for {setup.Rule2Pattern} at {setup.SignalTime}. Entry: {entryPrice}, SL: {stopLossPrice}");
+                Print($"Setup invalidated: Stop Loss Price ({stopLossPrice.ToString("F" + Symbol.Digits)}) is on the wrong side or at entry price ({entryPrice.ToString("F" + Symbol.Digits)}). SL Base: {slBasePrice.ToString("F" + Symbol.Digits)}, Offset: {StopLossOffsetTicks} ticks.");
+                setup.IsValid = false;
+                return false;
+            }
+
+            // Print($"Debug SL Calc: Entry={entryPrice.ToString("F" + Symbol.Digits)}, SLBase={slBasePrice.ToString("F" + Symbol.Digits)} ({slReason}), SLOffsetTicks={StopLossOffsetTicks}, TickSize={Symbol.TickSize}, Calculated SL={stopLossPrice.ToString("F" + Symbol.Digits)}");
+
+            double strategicPipSize = 10 * Symbol.TickSize; 
+            if (strategicPipSize == 0) strategicPipSize = Symbol.TickSize; // Fallback if 10*TickSize is zero
+
+            if (strategicPipSize == 0) {
+                Print("Error: strategicPipSize is zero, cannot validate SL or calculate volume.");
+                return false;
+            }
+            
+            double riskDistanceInPrice = Math.Abs(entryPrice - stopLossPrice);
+            if (riskDistanceInPrice < Symbol.TickSize) // Minimum possible SL is 1 tick
+            {
+                Print($"Setup invalidated: Risk distance ({riskDistanceInPrice}) is less than TickSize ({Symbol.TickSize}). SL likely too close or error in calculation.");
+                setup.IsValid = false;
+                return false;
+            }
+
+            double stopLossInStrategicPips = riskDistanceInPrice / strategicPipSize;
+            double minStopLossInStrategicPipsThreshold = (minStopLossPipsParamValue * (Symbol.PipSize > 0 ? Symbol.PipSize : strategicPipSize) / strategicPipSize);
+            if (stopLossInStrategicPips < minStopLossInStrategicPipsThreshold) 
+            {
+                 Print($"Setup invalidated: SL (in strategic pips) {stopLossInStrategicPips:F2} is less than min threshold {minStopLossInStrategicPipsThreshold:F2} for {setup.Rule2Pattern} at {setup.SignalTime}. Entry: {entryPrice}, SL: {stopLossPrice}");
                 setup.IsValid = false;
                 return false;
             }
@@ -793,49 +852,82 @@ namespace cAlgo.Robots
             setup.EntryPrice = entryPrice;
             setup.StopLossPrice = stopLossPrice;
 
-            // --- Logic for Fixed RR Take Profit ---
-            double riskDistance = Math.Abs(entryPrice - stopLossPrice);
-            
-            // Ensure riskDistance is meaningful (e.g., not smaller than pipsize, though stopLossPips check should cover most cases)
-            if (riskDistance < Symbol.PipSize / 2) // Check if risk distance is extremely small
+            // --- New Take Profit Logic using Fractals and R/R Range ---
+            List<FractalInfo> potentialTPs = new List<FractalInfo>();
+            if (setup.IsBullish)
             {
-                Print($"Setup invalidated (Fixed RR): Risk distance {riskDistance} is too small. Entry: {entryPrice}, SL: {stopLossPrice}");
+                potentialTPs.AddRange(h1Fractals.Where(f => f.IsHighFractal && f.Price > entryPrice));
+                potentialTPs.AddRange(m15Fractals.Where(f => f.IsHighFractal && f.Price > entryPrice));
+                potentialTPs = potentialTPs.OrderBy(f => f.Price).ToList(); // Closest TP first
+            }
+            else // Bearish
+            {
+                potentialTPs.AddRange(h1Fractals.Where(f => !f.IsHighFractal && f.Price < entryPrice));
+                potentialTPs.AddRange(m15Fractals.Where(f => !f.IsHighFractal && f.Price < entryPrice));
+                potentialTPs = potentialTPs.OrderByDescending(f => f.Price).ToList(); // Closest TP first
+            }
+
+            if (!potentialTPs.Any())
+            {
+                // Print($"Setup invalidated: No suitable fractals found for TP for {setup.Rule2Pattern} at {setup.SignalTime}. Bullish: {setup.IsBullish}");
                 setup.IsValid = false;
                 return false;
             }
 
-            double fixedRR = 2.0;
-            double rewardDistance = riskDistance * fixedRR;
-            double calculatedTpPrice;
+            FractalInfo chosenFractal = null;
+            double chosenTpPrice = 0;
+            double chosenRR = 0;
 
-            if (setup.IsBullish)
+            foreach (var fractalTp in potentialTPs)
             {
-                calculatedTpPrice = entryPrice + rewardDistance;
-            }
-            else // Bearish
-            {
-                calculatedTpPrice = entryPrice - rewardDistance;
+                double currentTpPrice = fractalTp.Price;
+                double rewardDistance = Math.Abs(currentTpPrice - entryPrice);
+
+                if (rewardDistance < Symbol.TickSize) continue; // TP must be at least 1 tick away from entry
+
+                double currentRR = riskDistanceInPrice / rewardDistance; // Standard definition: Reward / Risk
+                if (riskDistanceInPrice > 0) // Recalculate RR as Reward/Risk
+                {
+                     currentRR = rewardDistance / riskDistanceInPrice;
+                } else {
+                    currentRR = 0; // Avoid division by zero if risk is somehow zero
+                }
+
+
+                if (currentRR >= MinRR && currentRR <= MaxRR)
+                {
+                    chosenFractal = fractalTp;
+                    chosenTpPrice = currentTpPrice;
+                    chosenRR = currentRR;
+                    break; // Found a suitable TP
+                }
             }
 
-            setup.TakeProfitTargetPrice = calculatedTpPrice;
-            setup.RiskRewardRatio = fixedRR;
-            setup.TakeProfitFractal = null; // Not using fractal for TP anymore
+            if (chosenFractal == null)
+            {
+                // Print($"Setup invalidated: No fractal TP found that meets R/R criteria [{MinRR}-{MaxRR}] for {setup.Rule2Pattern} at {setup.SignalTime}.");
+                setup.IsValid = false;
+                return false;
+            }
+            
+            setup.TakeProfitTargetPrice = chosenTpPrice;
+            setup.RiskRewardRatio = chosenRR;
+            setup.TakeProfitFractal = chosenFractal;
 
             double calculatedVolume = CalculatePositionVolume(stopLossPrice, entryPrice);
             if (calculatedVolume > 0)
             {
                 setup.CalculatedVolumeInUnits = calculatedVolume;
                 setup.IsValid = true;
-                Print($"Validated Setup (Fixed RR): {setup.Rule2Pattern} at {setup.SignalTime}, Entry: {setup.EntryPrice.ToString("F" + Symbol.Digits)}, SL: {setup.StopLossPrice.ToString("F" + Symbol.Digits)}, TP: {setup.TakeProfitTargetPrice.ToString("F" + Symbol.Digits)}, RR: {setup.RiskRewardRatio:F2}, VolLots: {Symbol.VolumeInUnitsToQuantity(calculatedVolume)}");
+                Print($"Validated Setup (Fractal TP): {setup.Rule2Pattern} at {setup.SignalTime}, Entry: {setup.EntryPrice.ToString("F" + Symbol.Digits)}, SL: {setup.StopLossPrice.ToString("F" + Symbol.Digits)}, TP: {setup.TakeProfitTargetPrice.ToString("F" + Symbol.Digits)} (Fractal {setup.TakeProfitFractal.TF} {setup.TakeProfitFractal.Time} @ {setup.TakeProfitFractal.Price.ToString("F"+Symbol.Digits)}), RR: {setup.RiskRewardRatio:F2}, VolLots: {Symbol.VolumeInUnitsToQuantity(calculatedVolume)}");
                 return true;
             }
             else
             {
-                Print($"Setup invalidated (Fixed RR): Calculated volume is 0 for {setup.Rule2Pattern} at {setup.SignalTime}. TP: {setup.TakeProfitTargetPrice.ToString("F" + Symbol.Digits)}, RR: {fixedRR:F2}");
+                Print($"Setup invalidated (Fractal TP): Calculated volume is 0 for {setup.Rule2Pattern} at {setup.SignalTime}. Chosen TP: {setup.TakeProfitTargetPrice.ToString("F" + Symbol.Digits)}, RR: {setup.RiskRewardRatio:F2}");
                 setup.IsValid = false;
                 return false;
             }
-            // --- End of Fixed RR Take Profit logic ---
         }
 
         private void ProcessSetups(List<SetupInfo> setups)

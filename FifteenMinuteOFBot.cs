@@ -61,6 +61,15 @@ namespace cAlgo.Robots
         [Parameter("LS Detection Window Bars", DefaultValue = 3, MinValue = 1, MaxValue = 5, Group = "Strategy - LS")]
         public int LSDetectionWindowBars { get; set; } // How many recent bars to check for a sweep event
 
+        [Parameter("---- Rule 1 LS Parameters ----", Group = "Strategy - Rule 1 LS")]
+        public string SeparatorRule1LS { get; set; }
+
+        [Parameter("Rule 1 LS Lookback Bars", DefaultValue = 20, MinValue = 3, MaxValue = 100, Group = "Strategy - Rule 1 LS")]
+        public int Rule1_LSLookbackBars { get; set; }
+
+        [Parameter("Rule 1 LS Detection Window", DefaultValue = 5, MinValue = 1, MaxValue = 10, Group = "Strategy - Rule 1 LS")]
+        public int Rule1_LSDetectionWindowBars { get; set; }
+
         [Parameter("---- Fractal Parameters ----", Group = "Strategy - Fractals")]
         public string SeparatorFr { get; set; }
 
@@ -68,13 +77,16 @@ namespace cAlgo.Robots
         public int FractalLookbackBars { get; set; } // How many bars to scan for fractals on M15 and H1
 
         [Parameter("---- FVG Parameters ----", Group = "Strategy - FVG")]
-        public string SeparatorFVG { get; set; } // Dummy for spacing
+        public string SeparatorFVG { get; set; }
 
         [Parameter("FVG Lookback Bars", DefaultValue = 20, MinValue = 3, Group = "Strategy - FVG")]
         public int FVGLookbackBars { get; set; }
 
         [Parameter("FVG Test Window Bars", DefaultValue = 3, MinValue = 1, MaxValue = 5, Group = "Strategy - FVG")]
         public int FVGTestWindowBars { get; set; } // How many recent bars to check for an FVG test
+
+        [Parameter("FVG Impulse Lookback Bars", DefaultValue = 10, MinValue = 3, MaxValue = 30, Group = "Strategy - FVG")]
+        public int FVGImpulseLookbackBars { get; set; }
 
         [Parameter("---- 15mOF Strategy Parameters ----", Group = "Strategy")]
         public string Separator2 { get; set; } // Dummy for spacing
@@ -94,6 +106,9 @@ namespace cAlgo.Robots
         [Parameter("SL Offset (Ticks)", DefaultValue = 15, MinValue = 1, Group = "Strategy")]
         public int StopLossOffsetTicks { get; set; }
 
+        [Parameter("Max Armed Duration (Bars)", DefaultValue = 10, MinValue = 1, MaxValue = 50, Group = "Strategy")]
+        public int MaxArmedDurationBars { get; set; }
+
         // Session times are now hardcoded as per user request
         // Frankfurt: 06:00-07:00 UTC
         // London:    07:00-12:00 UTC
@@ -105,6 +120,12 @@ namespace cAlgo.Robots
 
         private Bars _d1Bars;
         private Bars _h1Bars; 
+
+        // Arming State Variables
+        private bool _isArmedForLong = false;
+        private bool _isArmedForShort = false;
+        private ArmingInfo _armingDetails = null;
+        private DateTime _setupArmedTime = DateTime.MinValue;
 
         protected override void OnStart()
         {
@@ -121,8 +142,10 @@ namespace cAlgo.Robots
             Print($"D1 Context: Days={D1DaysForContext}, Min%Change={D1PercentageChangeForContext}");
             Print($"Strategy: Risk={RiskPercentPerTrade}%, SL Offset Ticks={StopLossOffsetTicks}, Label='{TradeLabel}' (Using Fixed RR=2.0)");
             Print($"LS Params: Lookback={LSLookbackBars}, DetectionWindow={LSDetectionWindowBars}");
-            Print($"FVG Params: Lookback={FVGLookbackBars}, TestWindow={FVGTestWindowBars}");
+            Print($"Rule 1 LS Params: Lookback={Rule1_LSLookbackBars}, DetectionWindow={Rule1_LSDetectionWindowBars}");
+            Print($"FVG Params: Lookback={FVGLookbackBars}, TestWindow={FVGTestWindowBars}, ImpulseLookback={FVGImpulseLookbackBars}");
             Print($"Fractal Params: Lookback={FractalLookbackBars}");
+            Print($"Strategy Params: MaxArmedDurationBars={MaxArmedDurationBars}");
 
             if (TimeFrame != TimeFrame.Minute15)
             {
@@ -137,58 +160,210 @@ namespace cAlgo.Robots
 
         protected override void OnBar()
         {
-            // Determine D1 context only once per new D1 bar or on initial run
-            bool newD1BarFormed = _d1Bars.OpenTimes.LastValue.Date > _lastD1ContextUpdateDate;
-
             if (!IsTradingSessionActive())
             {
-                // Optional: Print log only if it changes state or periodically
                 // Print("Trading session is not active. Skipping strategy logic.");
                 return;
             }
 
+            bool newD1BarFormed = _d1Bars.OpenTimes.LastValue.Date > _lastD1ContextUpdateDate;
             if (newD1BarFormed || _currentD1Context == "Initializing...")
             {
                  Print("New D1 bar formed or initial run, re-evaluating D1 context...");
                  DetermineD1Context();
                  _lastD1ContextUpdateDate = _d1Bars.OpenTimes.LastValue.Date;
+                 // If D1 context changes, reset any armed state
+                 ResetArmedState("D1 Context Changed");
             }
 
-            // Main strategy logic will go here, gated by _currentD1Context
-            if (_currentD1Context == "Uptrend")
+            // If armed, check for entry trigger or timeout
+            if (_isArmedForLong || _isArmedForShort)
             {
-                // Look for 15mOF Long setups
-                // Print("D1 Context: Uptrend. Looking for LONG 15mOF setups...");
-                List<FVGInfo> m15fvgs = FindFVGs(Bars, FVGLookbackBars);
-                List<LiquiditySweepInfo> m15sweeps = FindLiquiditySweeps(Bars);
+                if (Bars.OpenTimes.LastValue > _setupArmedTime.AddMinutes(MaxArmedDurationBars * 15)) // Assuming M15 timeframe
+                {
+                    ResetArmedState($"Armed state timed out after {MaxArmedDurationBars} bars.");
+                }
+                else
+                {
+                    // Placeholder for new entry logic
+                    bool tradeExecuted = LookForEntryTriggerAndExecute(); 
+                    if (tradeExecuted)
+                    {
+                        ResetArmedState("Trade executed.");
+                        return; // Stop further processing on this bar
+                    }
+                    // If no trade executed, bot remains armed and waits for next bar or timeout
+                    // Print($"Bot remains armed. {_armingDetails.ArmingPattern} for {_armingDetails.ArmingSignalTime}. Waiting for entry trigger.");
+                    return; 
+                }
+            }
+
+            // If not armed, and D1 context is clear, look for an arming condition
+            if (!_isArmedForLong && !_isArmedForShort)
+            {
+                if (_currentD1Context == "Uptrend" || _currentD1Context == "Downtrend")
+                {
+                    List<FVGInfo> m15fvgs = FindFVGs(Bars, FVGLookbackBars);
+                    List<LiquiditySweepInfo> m15Rule1Sweeps = FindLiquiditySweeps(Bars, Rule1_LSLookbackBars, Rule1_LSDetectionWindowBars);
+                    List<LiquiditySweepInfo> m15SecondarySweeps = FindLiquiditySweeps(Bars, LSLookbackBars, LSDetectionWindowBars);
+                    // Fractals are needed for TryCalculateTradeParameters, which is called by LookForEntryTriggerAndExecute
+                    // List<FractalInfo> m15Fractals = FindFractals(Bars, TimeFrame.Minute15, FractalLookbackBars);
+                    // List<FractalInfo> h1Fractals = FindFractals(_h1Bars, TimeFrame.Hour, FractalLookbackBars); 
+                    
+                    foreach(var fvg in m15fvgs) { CheckAndMarkFVGTest(fvg, Bars, FVGTestWindowBars); }
+
+                    ArmingInfo identifiedArmingCondition = IdentifyArmingCondition(m15Rule1Sweeps, m15SecondarySweeps, m15fvgs, _currentD1Context);
+
+                    if (identifiedArmingCondition.IsMet)
+                    {
+                        _armingDetails = identifiedArmingCondition;
+                        _setupArmedTime = Bars.OpenTimes.LastValue; // Time of the bar where arming condition was met
+                        if (_armingDetails.IsBullish)
+                        {
+                            _isArmedForLong = true;
+                            Print($"BOT ARMED FOR LONG. Pattern: {_armingDetails.ArmingPattern}, Signal Time: {_armingDetails.ArmingSignalTime}, D1: {_currentD1Context}");
+                        }
+                        else
+                        {
+                            _isArmedForShort = true;
+                            Print($"BOT ARMED FOR SHORT. Pattern: {_armingDetails.ArmingPattern}, Signal Time: {_armingDetails.ArmingSignalTime}, D1: {_currentD1Context}");
+                        }
+                    }
+                }
+                else
+                {
+                    // Print($"D1 Context: {_currentD1Context}. Not looking for arming conditions.");
+                }
+            }
+        }
+
+        private void ResetArmedState(string reason)
+        {
+            if (_isArmedForLong || _isArmedForShort)
+            {
+                Print($"Armed state reset: {reason}");
+            }
+            _isArmedForLong = false;
+            _isArmedForShort = false;
+            _armingDetails = null;
+            _setupArmedTime = DateTime.MinValue;
+        }
+
+        // Placeholder - to be fully implemented
+        private bool LookForEntryTriggerAndExecute()
+        {
+            // Print("DEBUG: LookForEntryTriggerAndExecute() called.");
+
+            // 1. Find *new* M15 FVGs and *new* M15 LSs.
+            // We need the freshest data. Consider only elements formed/confirmed on the very last closed bar (index 1).
+            List<FVGInfo> currentFVGs = FindFVGs(Bars, FVGLookbackBars); // Use general FVG lookback
+            foreach(var fvg in currentFVGs) { CheckAndMarkFVGTest(fvg, Bars, FVGTestWindowBars); }
+
+            // For entry triggers, we are interested in sweeps confirmed on the *last closed bar* (index 1)
+            List<LiquiditySweepInfo> currentLSs = FindLiquiditySweeps(Bars, LSLookbackBars, LSDetectionWindowBars); // Use general LS params
+
+            TradeExecutionInfo tradeInfo = null;
+            bool entryTriggerFound = false;
+            double entryPrice = Bars.ClosePrices.Last(1); // Default entry is close of the trigger bar
+
+            if (_isArmedForLong)
+            {
+                // Priority 1: FVG Test as entry trigger
+                FVGInfo bullishEntryFVG = currentFVGs.FirstOrDefault(fvg => fvg.IsBullish && 
+                                                                    fvg.IsTested && 
+                                                                    fvg.TestBarIndex == 1); // Tested on last closed bar
+                if (bullishEntryFVG != null)
+                {
+                    Print($"ARMED LONG: Bullish FVG Test entry trigger found at {bullishEntryFVG.Time}, tested by bar {Bars.OpenTimes.Last(1)}");
+                    tradeInfo = new TradeExecutionInfo(true) 
+                    {
+                        EntryTriggerTime = Bars.OpenTimes.Last(1),
+                        EntryPrice = entryPrice, 
+                        EntryFVG = bullishEntryFVG
+                    };
+                    entryTriggerFound = true;
+                }
+
+                // Priority 2: Local Bullish LS as entry trigger (if no FVG test)
+                if (!entryTriggerFound)
+                {
+                    LiquiditySweepInfo bullishEntryLS = currentLSs.FirstOrDefault(ls => !ls.IsBullishSweepAbove && // Low swept, bullish signal
+                                                                                ls.ConfirmationBarIndex == 1); // Confirmed on last closed bar
+                    if (bullishEntryLS != null)
+                    {
+                        Print($"ARMED LONG: Bullish Local LS entry trigger found at {bullishEntryLS.Time}");
+                        tradeInfo = new TradeExecutionInfo(true)
+                        {
+                            EntryTriggerTime = Bars.OpenTimes.Last(1),
+                            EntryPrice = entryPrice,
+                            EntryLS = bullishEntryLS
+                        };
+                        entryTriggerFound = true;
+                    }
+                }
+            }
+            else if (_isArmedForShort)
+            {
+                // Priority 1: FVG Test as entry trigger
+                FVGInfo bearishEntryFVG = currentFVGs.FirstOrDefault(fvg => !fvg.IsBullish && 
+                                                                    fvg.IsTested && 
+                                                                    fvg.TestBarIndex == 1); // Tested on last closed bar
+                if (bearishEntryFVG != null)
+                {
+                    Print($"ARMED SHORT: Bearish FVG Test entry trigger found at {bearishEntryFVG.Time}, tested by bar {Bars.OpenTimes.Last(1)}");
+                    tradeInfo = new TradeExecutionInfo(false) 
+                    {
+                        EntryTriggerTime = Bars.OpenTimes.Last(1),
+                        EntryPrice = entryPrice, 
+                        EntryFVG = bearishEntryFVG
+                    };
+                    entryTriggerFound = true;
+                }
+
+                // Priority 2: Local Bearish LS as entry trigger (if no FVG test)
+                if (!entryTriggerFound)
+                {
+                    LiquiditySweepInfo bearishEntryLS = currentLSs.FirstOrDefault(ls => ls.IsBullishSweepAbove && // High swept, bearish signal
+                                                                                 ls.ConfirmationBarIndex == 1); // Confirmed on last closed bar
+                    if (bearishEntryLS != null)
+                    {
+                        Print($"ARMED SHORT: Bearish Local LS entry trigger found at {bearishEntryLS.Time}");
+                        tradeInfo = new TradeExecutionInfo(false)
+                        {
+                            EntryTriggerTime = Bars.OpenTimes.Last(1),
+                            EntryPrice = entryPrice,
+                            EntryLS = bearishEntryLS
+                        };
+                        entryTriggerFound = true;
+                    }
+                }
+            }
+
+            if (entryTriggerFound && tradeInfo != null)
+            {
+                // Fetch fractals for TP calculation
                 List<FractalInfo> m15Fractals = FindFractals(Bars, TimeFrame.Minute15, FractalLookbackBars);
-                List<FractalInfo> h1Fractals = FindFractals(_h1Bars, TimeFrame.Hour, FractalLookbackBars); 
-                // Mark FVG as tested
-                foreach(var fvg in m15fvgs) { CheckAndMarkFVGTest(fvg, Bars, FVGTestWindowBars); }
+                List<FractalInfo> h1Fractals = FindFractals(_h1Bars, TimeFrame.Hour, FractalLookbackBars);
 
-                List<SetupInfo> setups = CheckForSetups(m15sweeps, m15fvgs, m15Fractals, h1Fractals, _currentD1Context);
-                // Process setups
-                ProcessSetups(setups);
+                if (TryCalculateTradeParameters(tradeInfo, m15Fractals, h1Fractals))
+                {
+                    if (tradeInfo.IsValid) // Double check IsValid from TryCalculateTradeParameters
+                    {
+                        ProcessTradeExecution(tradeInfo);
+                        return true; // Signal that trade was attempted, reset armed state
+                    }
+                    else
+                    {
+                        Print("Entry trigger found, but trade parameters were invalid. Remaining armed.");
+                    }
+                }
+                else
+                {
+                    Print("Entry trigger found, but failed to calculate trade parameters. Remaining armed.");
+                }
             }
-            else if (_currentD1Context == "Downtrend")
-            {
-                // Look for 15mOF Short setups
-                // Print("D1 Context: Downtrend. Looking for SHORT 15mOF setups...");
-                List<FVGInfo> m15fvgs = FindFVGs(Bars, FVGLookbackBars);
-                List<LiquiditySweepInfo> m15sweeps = FindLiquiditySweeps(Bars);
-                List<FractalInfo> m15Fractals = FindFractals(Bars, TimeFrame.Minute15, FractalLookbackBars);
-                List<FractalInfo> h1Fractals = FindFractals(_h1Bars, TimeFrame.Hour, FractalLookbackBars); 
-                // Mark FVG as tested
-                foreach(var fvg in m15fvgs) { CheckAndMarkFVGTest(fvg, Bars, FVGTestWindowBars); }
-
-                List<SetupInfo> setups = CheckForSetups(m15sweeps, m15fvgs, m15Fractals, h1Fractals, _currentD1Context);
-                // Process setups
-                ProcessSetups(setups);
-            }
-            else
-            {
-                // Print($"D1 Context: {_currentD1Context}. No 15mOF trades.");
-            }
+            
+            return false; // No valid entry trigger found or executed
         }
 
         private void DetermineD1Context()
@@ -389,31 +564,26 @@ namespace cAlgo.Robots
         }
 
         // Function to find Liquidity Sweeps (LS)
-        private List<LiquiditySweepInfo> FindLiquiditySweeps(Bars series) // Changed to accept Bars
+        private List<LiquiditySweepInfo> FindLiquiditySweeps(Bars series, int lookbackBars, int detectionWindowBars) 
         {
             var sweeps = new List<LiquiditySweepInfo>();
-            // We need at least LSLookbackBars + LSDetectionWindowBars 
-            if (series.Count < LSLookbackBars + LSDetectionWindowBars + 1) // +1 because Last() is 1-indexed for recent bar
+            if (series.Count < lookbackBars + detectionWindowBars + 1) 
             {
                 return sweeps; 
             }
 
-            // Iterate through the detection window (recent bars)
-            // Detection window starts from the last closed bar (index 1) up to LSDetectionWindowBars
-            for (int i = 1; i <= LSDetectionWindowBars; i++)
+            for (int i = 1; i <= detectionWindowBars; i++)
             {
-                var detectionBar = series.Last(i); // Bar being checked if it performed a sweep
+                var detectionBar = series.Last(i); 
                 DateTime detectionBarTime = detectionBar.OpenTime;
                 double detectionBarHigh = detectionBar.High;
                 double detectionBarLow = detectionBar.Low;
                 double detectionBarClose = detectionBar.Close;
 
-                // Define the lookback period for finding the High/Low to be swept
-                // This period is *before* the detectionBar
-                int lookbackStartIdx = i + 1; // Start looking from the bar just before the detection bar
-                int lookbackEndIdx = i + LSLookbackBars;
+                int lookbackStartIdx = i + 1; 
+                int lookbackEndIdx = i + lookbackBars;
 
-                if (series.Count <= lookbackEndIdx) continue; // Not enough history for this detection bar
+                if (series.Count <= lookbackEndIdx) continue;
 
                 double recentHigh = double.MinValue;
                 double recentLow = double.MaxValue;
@@ -434,35 +604,33 @@ namespace cAlgo.Robots
                     }
                 }
                 
-                // Check for Bullish Sweep (High Swept - potential bearish signal)
                 if (highBarIndex != -1 && detectionBarHigh > recentHigh && detectionBarClose < recentHigh)
                 {
                     sweeps.Add(new LiquiditySweepInfo
                     {
                         Time = detectionBarTime,
                         SweptLevel = recentHigh,
-                        IsBullishSweepAbove = true, // High was swept
+                        IsBullishSweepAbove = true, 
                         ConfirmationBarIndex = i,
                         WickHigh = detectionBarHigh,
                         WickLow = detectionBarLow
                     });
                 }
 
-                // Check for Bearish Sweep (Low Swept - potential bullish signal)
                 if (lowBarIndex != -1 && detectionBarLow < recentLow && detectionBarClose > recentLow)
                 {
                     sweeps.Add(new LiquiditySweepInfo
                     {
                         Time = detectionBarTime,
                         SweptLevel = recentLow,
-                        IsBullishSweepAbove = false, // Low was swept
+                        IsBullishSweepAbove = false, 
                         ConfirmationBarIndex = i,
                         WickHigh = detectionBarHigh,
                         WickLow = detectionBarLow
                     });
                 }
             }
-            return sweeps.OrderBy(s => s.ConfirmationBarIndex).ToList(); // Return sweeps ordered by recency
+            return sweeps.OrderBy(s => s.ConfirmationBarIndex).ToList(); 
         }
 
         // Function to find 3-bar Fractals
@@ -569,263 +737,240 @@ namespace cAlgo.Robots
             return false;
         }
 
-        // Class to hold information about a potential trading setup
-        public class SetupInfo
+        // Renamed from SetupInfo
+        public class ArmingInfo
         {
-            public bool IsValid { get; set; } = false;
-            public string Rule2Pattern { get; set; } // e.g., "LS+LS", "LS+FVGTest", "FVGTest+FVGTest"
-            public DateTime SignalTime { get; set; } // Time of the *second* (triggering) event in the pattern
-            public bool IsBullish { get; set; }    // True for long setup, false for short
+            public bool IsMet { get; set; } = false;
+            public string ArmingPattern { get; set; } 
+            public DateTime ArmingSignalTime { get; set; } 
+            public bool IsBullish { get; set; }    
             
             public LiquiditySweepInfo PrimaryLS { get; set; } 
             public LiquiditySweepInfo SecondaryLS { get; set; } 
             public FVGInfo PrimaryFVGTest { get; set; } 
             public FVGInfo SecondaryFVGTest { get; set; } 
 
-            // Entry, SL, TP details
-            public double EntryPrice { get; set; }
-            public double StopLossPrice { get; set; }
-            public double TakeProfitTargetPrice { get; set; }
-            public FractalInfo TakeProfitFractal { get; set; } // The fractal used as TP
-            public double RiskRewardRatio { get; set; }
-            public double CalculatedVolumeInUnits { get; set; }
-
-            public SetupInfo(bool isBullish)
+            public ArmingInfo(bool isBullish)
             {
                 IsBullish = isBullish;
             }
         }
 
-        // Method to check for 15mOF Setups based on Rules 1 & 2
-        private List<SetupInfo> CheckForSetups(List<LiquiditySweepInfo> m15Sweeps, List<FVGInfo> m15FVGs, List<FractalInfo> m15Fractals, List<FractalInfo> h1Fractals, string d1Context)
+        // Renamed from CheckForSetups. Now returns ArmingInfo and doesn't do SL/TP.
+        private ArmingInfo IdentifyArmingCondition(List<LiquiditySweepInfo> m15Rule1Sweeps, List<LiquiditySweepInfo> m15SecondarySweeps, List<FVGInfo> m15FVGs, string d1Context)
         {
-            var validSetups = new List<SetupInfo>();
+            // Default to not met, bullish (will be overridden)
+            var potentialArmingCondition = new ArmingInfo(true) { IsMet = false }; 
+
             if (d1Context == "Ranging/Undefined" || d1Context == "Insufficient Data" || d1Context == "Initializing..." || d1Context.StartsWith("Error"))
             {
-                return validSetups; // No trading if D1 context is not clear
+                return potentialArmingCondition; // No arming if D1 context is not clear
             }
 
             bool lookingForBullish = d1Context == "Uptrend";
+            potentialArmingCondition.IsBullish = lookingForBullish;
 
             // Rule 2.1: LS + LS
-            // Iterate through all M15 Sweeps as the potential second (triggering) LS
-            foreach (var ls2 in m15Sweeps)
+            foreach (var ls2 in m15SecondarySweeps) 
             {
-                // Check D1 alignment for ls2
-                // Bullish setup: ls2 must be a low sweep (!ls2.IsBullishSweepAbove)
-                // Bearish setup: ls2 must be a high sweep (ls2.IsBullishSweepAbove)
                 if ((lookingForBullish && !ls2.IsBullishSweepAbove) || (!lookingForBullish && ls2.IsBullishSweepAbove))
                 {
-                    // Look for an earlier M15 Sweep (ls1)
-                    foreach (var ls1 in m15Sweeps)
+                    foreach (var ls1 in m15Rule1Sweeps) 
                     {
-                        if (ls1 == ls2) continue; // Cannot be the same sweep
-
-                        // ls1 must also align with D1 context
+                        if (ls1.ConfirmationBarIndex == ls2.ConfirmationBarIndex && ls1.Time == ls2.Time) continue;
                         if (!((lookingForBullish && !ls1.IsBullishSweepAbove) || (!lookingForBullish && ls1.IsBullishSweepAbove))) continue;
                         
-                        // ls1 must be older than or same bar as ls2
-                        // ls1.ConfirmationBarIndex >= ls2.ConfirmationBarIndex means ls1 is older or same.
-                        // ls1.Time <= ls2.Time
-                        if (ls1.ConfirmationBarIndex >= ls2.ConfirmationBarIndex && ls1.Time < ls2.Time) // Strictly ls1 older
+                        if (ls1.ConfirmationBarIndex >= ls2.ConfirmationBarIndex && ls1.Time < ls2.Time) 
                         {
-                            var setup = new SetupInfo(lookingForBullish)
-                            {
-                                Rule2Pattern = "LS+LS",
-                                SignalTime = ls2.Time, // Time of the triggering (second) LS
-                                PrimaryLS = ls1,
-                                SecondaryLS = ls2,
-                                IsValid = true // Placeholder for Rule 3 check
-                            };
-                            // Print($"Potential LS+LS: ls1 ({ls1.Time} idx {ls1.ConfirmationBarIndex}), ls2 ({ls2.Time} idx {ls2.ConfirmationBarIndex})");
-                            validSetups.Add(setup);
+                            potentialArmingCondition.ArmingPattern = "LS+LS";
+                            potentialArmingCondition.ArmingSignalTime = ls2.Time; 
+                            potentialArmingCondition.PrimaryLS = ls1; 
+                            potentialArmingCondition.SecondaryLS = ls2;
+                            potentialArmingCondition.IsMet = true;
+                            return potentialArmingCondition; // Found an arming condition
                         }
                     }
                 }
             }
 
             // Rule 2.2: LS + FVG Test
-            // Iterate through all tested M15 FVGs as the potential FVG Test part
             foreach (var fvg_tested in m15FVGs)
             {
-                if (!fvg_tested.IsTested) continue; // Must be a tested FVG
-                if (fvg_tested.TestBarIndex < 1) continue; // Ensure TestBarIndex is valid
+                if (!fvg_tested.IsTested || fvg_tested.TestBarIndex < 1) continue; 
 
-                // Check D1 alignment for the FVG Test (Bullish FVG for Uptrend, Bearish FVG for Downtrend)
                 if ((lookingForBullish && fvg_tested.IsBullish) || (!lookingForBullish && !fvg_tested.IsBullish))
                 {
-                    // Look for an earlier M15 LS
-                    foreach (var ls1 in m15Sweeps)
+                    foreach (var ls1 in m15Rule1Sweeps) 
                     {
-                        // ls1 must align with D1 context
                         if (!((lookingForBullish && !ls1.IsBullishSweepAbove) || (!lookingForBullish && ls1.IsBullishSweepAbove))) continue;
 
-                        // ls1 (sweep) must be older than or same bar as the FVG test
-                        // ls1.ConfirmationBarIndex >= fvg_tested.TestBarIndex
-                        // ls1.Time <= Time of FVG test bar
                         DateTime fvgTestBarTime = Bars.OpenTimes.Last(fvg_tested.TestBarIndex);
-                        if (ls1.ConfirmationBarIndex >= fvg_tested.TestBarIndex && ls1.Time < fvgTestBarTime) // Strictly ls1 older
+                        if (ls1.ConfirmationBarIndex >= fvg_tested.TestBarIndex && ls1.Time < fvgTestBarTime) 
                         {
-                             var setup = new SetupInfo(lookingForBullish)
-                            {
-                                Rule2Pattern = "LS+FVGTest",
-                                SignalTime = fvgTestBarTime, 
-                                PrimaryLS = ls1,
-                                PrimaryFVGTest = fvg_tested,
-                                IsValid = true 
-                            };
-                            // Print($"Potential LS+FVGTest: ls1 ({ls1.Time} idx {ls1.ConfirmationBarIndex}), fvg_test ({fvgTestBarTime} idx {fvg_tested.TestBarIndex})");
-                            validSetups.Add(setup);
+                            potentialArmingCondition.ArmingPattern = "LS+FVGTest";
+                            potentialArmingCondition.ArmingSignalTime = fvgTestBarTime; 
+                            potentialArmingCondition.PrimaryLS = ls1; 
+                            potentialArmingCondition.PrimaryFVGTest = fvg_tested;
+                            potentialArmingCondition.IsMet = true;
+                            return potentialArmingCondition; // Found an arming condition
                         }
                     }
                 }
             }
             
             // Rule 2.3: FVG Test + FVG Test (and a preceding LS for Rule 1)
-            // Iterate through all tested M15 FVGs as the potential second (triggering) FVG Test
             foreach (var fvg2_tested in m15FVGs)
             {
-                if (!fvg2_tested.IsTested) continue;
-                if (fvg2_tested.TestBarIndex < 1) continue;
+                if (!fvg2_tested.IsTested || fvg2_tested.TestBarIndex < 1) continue;
 
-                // Check D1 alignment for fvg2_tested
                 if ((lookingForBullish && fvg2_tested.IsBullish) || (!lookingForBullish && !fvg2_tested.IsBullish))
                 {
                     DateTime fvg2TestBarTime = Bars.OpenTimes.Last(fvg2_tested.TestBarIndex);
-                    // Look for an earlier tested M15 FVG (fvg1_tested)
                     foreach (var fvg1_tested in m15FVGs)
                     {
                         if (fvg1_tested == fvg2_tested || !fvg1_tested.IsTested || fvg1_tested.TestBarIndex < 1) continue;
-                        
-                        // Check D1 alignment for fvg1_tested
                         if (!((lookingForBullish && fvg1_tested.IsBullish) || (!lookingForBullish && !fvg1_tested.IsBullish))) continue;
 
-                        // fvg1_tested must be older than or same bar as fvg2_tested
                         DateTime fvg1TestBarTime = Bars.OpenTimes.Last(fvg1_tested.TestBarIndex);
-                        if (fvg1_tested.TestBarIndex >= fvg2_tested.TestBarIndex && fvg1TestBarTime < fvg2TestBarTime) // Strictly fvg1_test older
+                        if (fvg1_tested.TestBarIndex >= fvg2_tested.TestBarIndex && fvg1TestBarTime < fvg2TestBarTime) 
                         {
-                            // Now check for Rule 1: A preceding/concurrent M15 LS before fvg1_tested
-                            LiquiditySweepInfo precedingLS = null;
-                            foreach (var ls_check in m15Sweeps)
+                            LiquiditySweepInfo precedingRule1LS = null;
+                            foreach (var ls_check in m15Rule1Sweeps) 
                             {
-                                // LS must align with D1
                                 if (!((lookingForBullish && !ls_check.IsBullishSweepAbove) || (!lookingForBullish && ls_check.IsBullishSweepAbove))) continue;
-
-                                // LS must occur before or at the same time as the first FVG test (fvg1_tested)
-                                // ls_check.ConfirmationBarIndex >= fvg1_tested.TestBarIndex
                                 if (ls_check.ConfirmationBarIndex >= fvg1_tested.TestBarIndex && ls_check.Time <= fvg1TestBarTime)
                                 {
-                                    precedingLS = ls_check;
+                                    precedingRule1LS = ls_check;
                                     break; 
                                 }
                             }
 
-                            if (precedingLS != null)
+                            if (precedingRule1LS != null)
                             {
-                                var setup = new SetupInfo(lookingForBullish)
-                                {
-                                    Rule2Pattern = "FVGTest+FVGTest",
-                                    SignalTime = fvg2TestBarTime,
-                                    PrimaryLS = precedingLS, // Rule 1 LS
-                                    PrimaryFVGTest = fvg1_tested,
-                                    SecondaryFVGTest = fvg2_tested,
-                                    IsValid = true 
-                                };
-                                // Print($"Potential FVGTest+FVGTest: fvg1_test ({fvg1TestBarTime} idx {fvg1_tested.TestBarIndex}), fvg2_test ({fvg2TestBarTime} idx {fvg2_tested.TestBarIndex}), precedingLS ({precedingLS.Time})");
-                                validSetups.Add(setup);
+                                potentialArmingCondition.ArmingPattern = "FVGTest+FVGTest";
+                                potentialArmingCondition.ArmingSignalTime = fvg2TestBarTime;
+                                potentialArmingCondition.PrimaryLS = precedingRule1LS; 
+                                potentialArmingCondition.PrimaryFVGTest = fvg1_tested;
+                                potentialArmingCondition.SecondaryFVGTest = fvg2_tested;
+                                potentialArmingCondition.IsMet = true;
+                                return potentialArmingCondition; // Found an arming condition
                             }
                         }
                     }
                 }
             }
             
-            // Filter setups by Rule 3 (TP/RR) and finalize valid ones
-            var finalizedSetups = new List<SetupInfo>();
-            foreach (var potentialSetup in validSetups)
-            {
-                if (TryFinalizeSetupWithRule3(potentialSetup, m15Fractals, h1Fractals))
-                {
-                    finalizedSetups.Add(potentialSetup);
-                }
-            }
-
-            if (finalizedSetups.Any())
-            {
-                Print($"Found {finalizedSetups.Count} finalized setups for D1: {d1Context}.");
-                // foreach(var s in finalizedSetups) { Print($"  - {s.Rule2Pattern} at {s.SignalTime}, Entry: {s.EntryPrice}, SL: {s.StopLossPrice}, TP: {s.TakeProfitTargetPrice}, RR: {s.RiskRewardRatio:F2}"); }
-            }
-            return finalizedSetups;
+            return potentialArmingCondition; // No arming condition met
         }
 
-        private bool TryFinalizeSetupWithRule3(SetupInfo setup, List<FractalInfo> m15Fractals, List<FractalInfo> h1Fractals)
+        // This class will hold details for actual trade execution
+        public class TradeExecutionInfo
         {
-            double entryPrice = 0;
-            double stopLossPrice = 0;
-            double minStopLossPipsParamValue = 1.0; // This was the old minStopLossPips, used for threshold calc
+            public bool IsValid { get; set; } = false;
+            // public string Rule2Pattern { get; set; } // May not be needed if ArmingInfo.ArmingPattern is used
+            public DateTime EntryTriggerTime { get; set; } 
+            public bool IsBullish { get; set; }    
+            
+            // Entry, SL, TP details
+            public double EntryPrice { get; set; }
+            public double StopLossPrice { get; set; }
+            public double TakeProfitTargetPrice { get; set; }
+            public FractalInfo TakeProfitFractal { get; set; } 
+            public double RiskRewardRatio { get; set; }
+            public double CalculatedVolumeInUnits { get; set; }
 
-            // Determine Entry Price based on the trigger of the Rule 2 pattern
-            // And determine the base price level from which SL will be calculated
+            // Store the entry trigger elements
+            public FVGInfo EntryFVG { get; set; } // if entry was FVG based
+            public LiquiditySweepInfo EntryLS { get; set; } // if entry was LS based
+
+            public TradeExecutionInfo(bool isBullish)
+            {
+                IsBullish = isBullish;
+            }
+        }
+
+        // Renamed from TryFinalizeSetupWithRule3 - role changed
+        // Now this function is primarily responsible for calculating SL (new logic), TP (fractal), RR and Volume
+        // based on a CONFIRMED entry trigger (new FVG test or new LS).
+        // The 'setup' argument should now be of type TradeExecutionInfo, 
+        // and it will also need access to _armingDetails for context if necessary for SL.
+        private bool TryCalculateTradeParameters(TradeExecutionInfo tradeInfo, List<FractalInfo> m15Fractals, List<FractalInfo> h1Fractals)
+        {
+            // tradeInfo.EntryPrice should already be set by LookForEntryTriggerAndExecute()
+            // tradeInfo.IsBullish also set.
+            // tradeInfo.EntryFVG or tradeInfo.EntryLS should be set.
+
+            double entryPrice = tradeInfo.EntryPrice;
+            double stopLossPrice = 0;
             double slBasePrice = 0;
             string slReason = "";
 
-            if (setup.Rule2Pattern == "LS+LS" && setup.SecondaryLS != null)
+            // New SL Logic ("Вариант В")
+            if (tradeInfo.EntryFVG != null) // FVG-based entry trigger
             {
-                if (setup.SecondaryLS.ConfirmationBarIndex < 1 || setup.SecondaryLS.ConfirmationBarIndex > Bars.Count) return false;
-                entryPrice = Bars.ClosePrices.Last(setup.SecondaryLS.ConfirmationBarIndex);
-                slBasePrice = setup.IsBullish ? setup.SecondaryLS.WickLow : setup.SecondaryLS.WickHigh;
-                slReason = setup.IsBullish ? "SecondaryLS.WickLow" : "SecondaryLS.WickHigh";
+                FVGInfo entryFVG = tradeInfo.EntryFVG;
+                // Find swing low/high of the impulse that created this entryFVG
+                int impulseStartIndex = entryFVG.SourceBarIndex + 1; // Bar 1 of the FVG
+                double relevantPrice = tradeInfo.IsBullish ? double.MaxValue : double.MinValue;
+
+                for (int i = 0; i < FVGImpulseLookbackBars; ++i)
+                {
+                    int barIdxToInspect = impulseStartIndex + i;
+                    if (barIdxToInspect >= Bars.Count) break; // Don't go out of bounds
+
+                    if (tradeInfo.IsBullish)
+                    {
+                        relevantPrice = Math.Min(relevantPrice, Bars.LowPrices.Last(barIdxToInspect));
+                    }
+                    else
+                    {
+                        relevantPrice = Math.Max(relevantPrice, Bars.HighPrices.Last(barIdxToInspect));
+                    }
+                }
+                if ((tradeInfo.IsBullish && relevantPrice == double.MaxValue) || (!tradeInfo.IsBullish && relevantPrice == double.MinValue))
+                {
+                     Print($"Error finding SL base for FVG entry: No valid low/high in FVGImpulseLookbackBars ({FVGImpulseLookbackBars}) from FVG at {entryFVG.Time}");
+                     return false;
+                }
+                slBasePrice = relevantPrice;
+                slReason = $"{(tradeInfo.IsBullish ? "SwingLow" : "SwingHigh")} of FVG impulse (FVG @{entryFVG.Time}, Lookback {FVGImpulseLookbackBars} bars)";
             }
-            else if (setup.Rule2Pattern == "LS+FVGTest" && setup.PrimaryFVGTest != null)
+            else if (tradeInfo.EntryLS != null) // LS-based entry trigger
             {
-                if (setup.PrimaryFVGTest.TestBarIndex < 1 || setup.PrimaryFVGTest.TestBarIndex > Bars.Count) return false;
-                entryPrice = Bars.ClosePrices.Last(setup.PrimaryFVGTest.TestBarIndex);
-                // For SL, use the Low/High of the bar that tested the FVG
-                slBasePrice = setup.IsBullish ? Bars.LowPrices.Last(setup.PrimaryFVGTest.TestBarIndex) : Bars.HighPrices.Last(setup.PrimaryFVGTest.TestBarIndex);
-                slReason = setup.IsBullish ? $"Low of FVG Test Bar (idx {setup.PrimaryFVGTest.TestBarIndex})" : $"High of FVG Test Bar (idx {setup.PrimaryFVGTest.TestBarIndex})";
-            }
-            else if (setup.Rule2Pattern == "FVGTest+FVGTest" && setup.SecondaryFVGTest != null)
-            {
-                if (setup.SecondaryFVGTest.TestBarIndex < 1 || setup.SecondaryFVGTest.TestBarIndex > Bars.Count) return false;
-                entryPrice = Bars.ClosePrices.Last(setup.SecondaryFVGTest.TestBarIndex);
-                // For SL, use the Low/High of the bar that tested the second FVG
-                slBasePrice = setup.IsBullish ? Bars.LowPrices.Last(setup.SecondaryFVGTest.TestBarIndex) : Bars.HighPrices.Last(setup.SecondaryFVGTest.TestBarIndex);
-                slReason = setup.IsBullish ? $"Low of Second FVG Test Bar (idx {setup.SecondaryFVGTest.TestBarIndex})" : $"High of Second FVG Test Bar (idx {setup.SecondaryFVGTest.TestBarIndex})";
+                LiquiditySweepInfo entryLS = tradeInfo.EntryLS;
+                slBasePrice = tradeInfo.IsBullish ? entryLS.WickLow : entryLS.WickHigh;
+                slReason = $"{(tradeInfo.IsBullish ? "EntryLS.WickLow" : "EntryLS.WickHigh")} @{entryLS.Time}";
             }
             else
             {
-                Print($"Error: Setup has unknown Rule2Pattern '{setup.Rule2Pattern}' or missing components for SL/Entry.");
+                Print($"Error: TradeExecutionInfo has no EntryFVG or EntryLS for SL calculation.");
                 return false; 
             }
 
             if (entryPrice == 0) 
             {
-                Print("Error: Entry price is zero after pattern evaluation.");
+                Print("Error: Entry price is zero in TryCalculateTradeParameters.");
                 return false;
             }
             
             if (slBasePrice <= 0 || (slBasePrice < entryPrice * 0.5 && entryPrice > 0) || (slBasePrice > entryPrice * 1.5 && entryPrice > 0) )
             {
-                Print($"Setup invalidated: SL base price ({slBasePrice.ToString("F" + Symbol.Digits)} from {slReason}) is zero, negative or absurd relative to entry price ({entryPrice.ToString("F" + Symbol.Digits)}).");
-                setup.IsValid = false;
+                Print($"Trade invalidated: SL base price ({slBasePrice.ToString("F" + Symbol.Digits)} from {slReason}) is zero, negative or absurd relative to entry price ({entryPrice.ToString("F" + Symbol.Digits)}).");
                 return false;
             }
 
-            stopLossPrice = setup.IsBullish 
+            stopLossPrice = tradeInfo.IsBullish 
                 ? (slBasePrice - StopLossOffsetTicks * Symbol.TickSize) 
                 : (slBasePrice + StopLossOffsetTicks * Symbol.TickSize);
             
-            // Ensure SL is not on the wrong side of entry or exactly at entry
-            if ((setup.IsBullish && stopLossPrice >= entryPrice) || (!setup.IsBullish && stopLossPrice <= entryPrice))
+            if ((tradeInfo.IsBullish && stopLossPrice >= entryPrice) || (!tradeInfo.IsBullish && stopLossPrice <= entryPrice))
             {
-                Print($"Setup invalidated: Stop Loss Price ({stopLossPrice.ToString("F" + Symbol.Digits)}) is on the wrong side or at entry price ({entryPrice.ToString("F" + Symbol.Digits)}). SL Base: {slBasePrice.ToString("F" + Symbol.Digits)}, Offset: {StopLossOffsetTicks} ticks.");
-                setup.IsValid = false;
+                Print($"Trade invalidated: Stop Loss Price ({stopLossPrice.ToString("F" + Symbol.Digits)}) is on the wrong side or at entry price ({entryPrice.ToString("F" + Symbol.Digits)}). SL Base: {slBasePrice.ToString("F" + Symbol.Digits)} ({slReason}), Offset: {StopLossOffsetTicks} ticks.");
                 return false;
             }
 
-            // Print($"Debug SL Calc: Entry={entryPrice.ToString("F" + Symbol.Digits)}, SLBase={slBasePrice.ToString("F" + Symbol.Digits)} ({slReason}), SLOffsetTicks={StopLossOffsetTicks}, TickSize={Symbol.TickSize}, Calculated SL={stopLossPrice.ToString("F" + Symbol.Digits)}");
-
             double strategicPipSize = 10 * Symbol.TickSize; 
-            if (strategicPipSize == 0) strategicPipSize = Symbol.TickSize; // Fallback if 10*TickSize is zero
+            if (strategicPipSize == 0) strategicPipSize = Symbol.TickSize; 
 
             if (strategicPipSize == 0) {
                 Print("Error: strategicPipSize is zero, cannot validate SL or calculate volume.");
@@ -833,44 +978,42 @@ namespace cAlgo.Robots
             }
             
             double riskDistanceInPrice = Math.Abs(entryPrice - stopLossPrice);
-            if (riskDistanceInPrice < Symbol.TickSize) // Minimum possible SL is 1 tick
+            if (riskDistanceInPrice < Symbol.TickSize) 
             {
-                Print($"Setup invalidated: Risk distance ({riskDistanceInPrice}) is less than TickSize ({Symbol.TickSize}). SL likely too close or error in calculation.");
-                setup.IsValid = false;
+                Print($"Trade invalidated: Risk distance ({riskDistanceInPrice}) is less than TickSize ({Symbol.TickSize}).");
                 return false;
             }
 
+            // Min SL check (placeholder value for minStopLossPipsParamValue, could be a param if needed)
+            double minStopLossPipsParamValue = 1.0; 
             double stopLossInStrategicPips = riskDistanceInPrice / strategicPipSize;
             double minStopLossInStrategicPipsThreshold = (minStopLossPipsParamValue * (Symbol.PipSize > 0 ? Symbol.PipSize : strategicPipSize) / strategicPipSize);
             if (stopLossInStrategicPips < minStopLossInStrategicPipsThreshold) 
             {
-                 Print($"Setup invalidated: SL (in strategic pips) {stopLossInStrategicPips:F2} is less than min threshold {minStopLossInStrategicPipsThreshold:F2} for {setup.Rule2Pattern} at {setup.SignalTime}. Entry: {entryPrice}, SL: {stopLossPrice}");
-                setup.IsValid = false;
+                 Print($"Trade invalidated: SL (in strategic pips) {stopLossInStrategicPips:F2} is less than min threshold {minStopLossInStrategicPipsThreshold:F2}. Entry: {entryPrice}, SL: {stopLossPrice}");
                 return false;
             }
 
-            setup.EntryPrice = entryPrice;
-            setup.StopLossPrice = stopLossPrice;
+            tradeInfo.StopLossPrice = stopLossPrice;
 
-            // --- New Take Profit Logic using Fractals and R/R Range ---
+            // --- Take Profit Logic using Fractals and R/R Range (largely reused) ---
             List<FractalInfo> potentialTPs = new List<FractalInfo>();
-            if (setup.IsBullish)
+            if (tradeInfo.IsBullish)
             {
                 potentialTPs.AddRange(h1Fractals.Where(f => f.IsHighFractal && f.Price > entryPrice));
                 potentialTPs.AddRange(m15Fractals.Where(f => f.IsHighFractal && f.Price > entryPrice));
-                potentialTPs = potentialTPs.OrderBy(f => f.Price).ToList(); // Closest TP first
+                potentialTPs = potentialTPs.OrderBy(f => f.Price).ToList(); 
             }
-            else // Bearish
+            else 
             {
                 potentialTPs.AddRange(h1Fractals.Where(f => !f.IsHighFractal && f.Price < entryPrice));
                 potentialTPs.AddRange(m15Fractals.Where(f => !f.IsHighFractal && f.Price < entryPrice));
-                potentialTPs = potentialTPs.OrderByDescending(f => f.Price).ToList(); // Closest TP first
+                potentialTPs = potentialTPs.OrderByDescending(f => f.Price).ToList(); 
             }
 
             if (!potentialTPs.Any())
             {
-                // Print($"Setup invalidated: No suitable fractals found for TP for {setup.Rule2Pattern} at {setup.SignalTime}. Bullish: {setup.IsBullish}");
-                setup.IsValid = false;
+                Print($"Trade invalidated: No suitable fractals found for TP. Bullish: {tradeInfo.IsBullish}");
                 return false;
             }
 
@@ -882,118 +1025,105 @@ namespace cAlgo.Robots
             {
                 double currentTpPrice = fractalTp.Price;
                 double rewardDistance = Math.Abs(currentTpPrice - entryPrice);
+                if (rewardDistance < Symbol.TickSize) continue; 
 
-                if (rewardDistance < Symbol.TickSize) continue; // TP must be at least 1 tick away from entry
-
-                double currentRR = riskDistanceInPrice / rewardDistance; // Standard definition: Reward / Risk
-                if (riskDistanceInPrice > 0) // Recalculate RR as Reward/Risk
+                double currentCalculatedRR = 0;
+                if (riskDistanceInPrice > 0) 
                 {
-                     currentRR = rewardDistance / riskDistanceInPrice;
-                } else {
-                    currentRR = 0; // Avoid division by zero if risk is somehow zero
+                     currentCalculatedRR = rewardDistance / riskDistanceInPrice;
                 }
 
-
-                if (currentRR >= MinRR && currentRR <= MaxRR)
+                if (currentCalculatedRR >= MinRR && currentCalculatedRR <= MaxRR)
                 {
                     chosenFractal = fractalTp;
                     chosenTpPrice = currentTpPrice;
-                    chosenRR = currentRR;
-                    break; // Found a suitable TP
+                    chosenRR = currentCalculatedRR;
+                    break; 
                 }
             }
 
             if (chosenFractal == null)
             {
-                // Print($"Setup invalidated: No fractal TP found that meets R/R criteria [{MinRR}-{MaxRR}] for {setup.Rule2Pattern} at {setup.SignalTime}.");
-                setup.IsValid = false;
+                Print($"Trade invalidated: No fractal TP found that meets R/R criteria [{MinRR}-{MaxRR}].");
                 return false;
             }
             
-            setup.TakeProfitTargetPrice = chosenTpPrice;
-            setup.RiskRewardRatio = chosenRR;
-            setup.TakeProfitFractal = chosenFractal;
+            tradeInfo.TakeProfitTargetPrice = chosenTpPrice;
+            tradeInfo.RiskRewardRatio = chosenRR;
+            tradeInfo.TakeProfitFractal = chosenFractal;
 
             double calculatedVolume = CalculatePositionVolume(stopLossPrice, entryPrice);
             if (calculatedVolume > 0)
             {
-                setup.CalculatedVolumeInUnits = calculatedVolume;
-                setup.IsValid = true;
-                Print($"Validated Setup (Fractal TP): {setup.Rule2Pattern} at {setup.SignalTime}, Entry: {setup.EntryPrice.ToString("F" + Symbol.Digits)}, SL: {setup.StopLossPrice.ToString("F" + Symbol.Digits)}, TP: {setup.TakeProfitTargetPrice.ToString("F" + Symbol.Digits)} (Fractal {setup.TakeProfitFractal.TF} {setup.TakeProfitFractal.Time} @ {setup.TakeProfitFractal.Price.ToString("F"+Symbol.Digits)}), RR: {setup.RiskRewardRatio:F2}, VolLots: {Symbol.VolumeInUnitsToQuantity(calculatedVolume)}");
+                tradeInfo.CalculatedVolumeInUnits = calculatedVolume;
+                tradeInfo.IsValid = true; // Mark as valid for execution
+                Print($"Trade Parameters Calculated: Entry: {tradeInfo.EntryPrice.ToString("F" + Symbol.Digits)}, SL: {tradeInfo.StopLossPrice.ToString("F" + Symbol.Digits)} (Base: {slBasePrice.ToString("F"+Symbol.Digits)} from {slReason}), TP: {tradeInfo.TakeProfitTargetPrice.ToString("F" + Symbol.Digits)} (Fractal {tradeInfo.TakeProfitFractal.TF} {tradeInfo.TakeProfitFractal.Time} @ {tradeInfo.TakeProfitFractal.Price.ToString("F"+Symbol.Digits)}), RR: {tradeInfo.RiskRewardRatio:F2}, VolLots: {Symbol.VolumeInUnitsToQuantity(calculatedVolume)}");
                 return true;
             }
             else
             {
-                Print($"Setup invalidated (Fractal TP): Calculated volume is 0 for {setup.Rule2Pattern} at {setup.SignalTime}. Chosen TP: {setup.TakeProfitTargetPrice.ToString("F" + Symbol.Digits)}, RR: {setup.RiskRewardRatio:F2}");
-                setup.IsValid = false;
+                Print($"Trade invalidated: Calculated volume is 0. Chosen TP: {tradeInfo.TakeProfitTargetPrice.ToString("F" + Symbol.Digits)}, RR: {tradeInfo.RiskRewardRatio:F2}");
                 return false;
             }
         }
 
-        private void ProcessSetups(List<SetupInfo> setups)
+        // Renamed from ProcessSetups
+        private void ProcessTradeExecution(TradeExecutionInfo tradeToExecute)
         {
-            if (!setups.Any()) return;
+            if (tradeToExecute == null || !tradeToExecute.IsValid) return;
 
-            // Check if there are already positions with this label
             var existingPosition = Positions.FirstOrDefault(p => p.Label == TradeLabel && p.SymbolName == SymbolName);
             if (existingPosition != null)
             {
-                // Print("A position with this label already exists. No new trade will be opened.");
+                Print("A position with this label already exists. No new trade will be opened.");
                 return;
             }
 
-            // Take the first valid setup found (could be more sophisticated later, e.g. best RR)
-            SetupInfo setupToTrade = setups.FirstOrDefault(s => s.IsValid);
+            TradeType tradeType = tradeToExecute.IsBullish ? TradeType.Buy : TradeType.Sell;
+            double volumeInUnits = tradeToExecute.CalculatedVolumeInUnits;
+            string symbolName = SymbolName;
+            // Entry price for market order is indicative. Actual entry will be based on market.
+            // double entry = tradeToExecute.EntryPrice; 
+            double stopLoss = tradeToExecute.StopLossPrice;
+            double takeProfit = tradeToExecute.TakeProfitTargetPrice;
 
-            if (setupToTrade != null)
+            double normalizedStopLoss = Math.Round(stopLoss, Symbol.Digits); 
+            double normalizedTakeProfit = Math.Round(takeProfit, Symbol.Digits); 
+
+            Print($"Attempting to open {tradeType} trade for {SymbolName} based on entry trigger at {tradeToExecute.EntryTriggerTime}.");
+            Print($"  ARMING Pattern was: {_armingDetails?.ArmingPattern} at {_armingDetails?.ArmingSignalTime}");
+            Print($"  Entry (indicative): {tradeToExecute.EntryPrice.ToString("F" + Symbol.Digits)}");
+            Print($"  Stop Loss (calculated): {stopLoss.ToString("F" + Symbol.Digits)}, Normalized SL: {normalizedStopLoss.ToString("F" + Symbol.Digits)}");
+            Print($"  Take Profit (calculated): {takeProfit.ToString("F" + Symbol.Digits)}, Normalized TP: {normalizedTakeProfit.ToString("F" + Symbol.Digits)}");
+            
+            string tpFractalTFStr = tradeToExecute.TakeProfitFractal == null ? "N/A" : tradeToExecute.TakeProfitFractal.TF.ToString();
+            string tpFractalTimeStr = tradeToExecute.TakeProfitFractal == null ? "N/A" : tradeToExecute.TakeProfitFractal.Time.ToString();
+            Print($"  Take Profit Fractal: {tpFractalTFStr} at {tpFractalTimeStr}");
+            
+            Print($"  Volume (Units): {volumeInUnits}");
+            Print($"  Volume (Lots): {Symbol.VolumeInUnitsToQuantity(volumeInUnits)}");
+            Print($"  Risk/Reward: {tradeToExecute.RiskRewardRatio:F2}");
+
+            var result = ExecuteMarketOrder(tradeType, symbolName, volumeInUnits, TradeLabel, null, null);
+
+            if (result.IsSuccessful)
             {
-                TradeType tradeType = setupToTrade.IsBullish ? TradeType.Buy : TradeType.Sell;
-                double volumeInUnits = setupToTrade.CalculatedVolumeInUnits;
-                string symbolName = SymbolName;
-                double entry = setupToTrade.EntryPrice; // For market order, this is indicative
-                double stopLoss = setupToTrade.StopLossPrice;
-                double takeProfit = setupToTrade.TakeProfitTargetPrice;
-
-                // Normalize prices before execution (manual approach)
-                double normalizedStopLoss = Math.Round(stopLoss, Symbol.Digits); 
-                double normalizedTakeProfit = Math.Round(takeProfit, Symbol.Digits); 
-
-                Print($"Attempting to open {tradeType} trade for {SymbolName} based on {setupToTrade.Rule2Pattern}.");
-                Print($"  Signal Time: {setupToTrade.SignalTime}");
-                Print($"  Entry (indicative): {entry.ToString("F" + Symbol.Digits)}");
-                Print($"  Stop Loss (calculated): {stopLoss.ToString("F" + Symbol.Digits)}, Normalized SL: {normalizedStopLoss.ToString("F" + Symbol.Digits)}");
-                Print($"  Take Profit (calculated): {takeProfit.ToString("F" + Symbol.Digits)}, Normalized TP: {normalizedTakeProfit.ToString("F" + Symbol.Digits)}");
-                
-                string tpFractalTFStr = setupToTrade.TakeProfitFractal == null ? "N/A" : setupToTrade.TakeProfitFractal.TF.ToString();
-                string tpFractalTimeStr = setupToTrade.TakeProfitFractal == null ? "N/A" : setupToTrade.TakeProfitFractal.Time.ToString();
-                Print($"  Take Profit: {takeProfit.ToString("F" + Symbol.Digits)} (Fractal on {tpFractalTFStr} at {tpFractalTimeStr})");
-                
-                Print($"  Volume (Units): {volumeInUnits}");
-                Print($"  Volume (Lots): {Symbol.VolumeInUnitsToQuantity(volumeInUnits)}");
-                Print($"  Risk/Reward: {setupToTrade.RiskRewardRatio:F2}");
-
-                // Execute order without SL/TP first
-                var result = ExecuteMarketOrder(tradeType, symbolName, volumeInUnits, TradeLabel, null, null);
-
-                if (result.IsSuccessful)
+                Print($"Market Order Sent: {tradeType} {Symbol.VolumeInUnitsToQuantity(volumeInUnits)} lots of {SymbolName}. Position ID: {result.Position.Id}");
+                Position position = result.Position;
+                var modifyResult = ModifyPosition(position, normalizedStopLoss, normalizedTakeProfit);
+                if (modifyResult.IsSuccessful)
                 {
-                    Print($"Market Order Sent: {tradeType} {Symbol.VolumeInUnitsToQuantity(volumeInUnits)} lots of {SymbolName}. Position ID: {result.Position.Id}");
-                    Position position = result.Position;
-                    var modifyResult = ModifyPosition(position, normalizedStopLoss, normalizedTakeProfit);
-                    if (modifyResult.IsSuccessful)
-                    {
-                        Print($"Position Modified: SL set to {normalizedStopLoss.ToString("F" + Symbol.Digits)}, TP set to {normalizedTakeProfit.ToString("F" + Symbol.Digits)}");
-                        // Log the actual SL/TP from the position object after modification, if available and different
-                        Print($"Trade Confirmed: Entry at {position.EntryPrice.ToString("F" + Symbol.Digits)}. SL Actual: {position.StopLoss?.ToString("F" + Symbol.Digits) ?? "N/A"}, TP Actual: {position.TakeProfit?.ToString("F" + Symbol.Digits) ?? "N/A"}");
-                    }
-                    else
-                    {
-                        Print($"Error modifying position {position.Id} to set SL/TP: {modifyResult.Error}");
-                    }
+                    Print($"Position Modified: SL set to {normalizedStopLoss.ToString("F" + Symbol.Digits)}, TP set to {normalizedTakeProfit.ToString("F" + Symbol.Digits)}");
+                    Print($"Trade Confirmed: Entry at {position.EntryPrice.ToString("F" + Symbol.Digits)}. SL Actual: {position.StopLoss?.ToString("F" + Symbol.Digits) ?? "N/A"}, TP Actual: {position.TakeProfit?.ToString("F" + Symbol.Digits) ?? "N/A"}");
                 }
                 else
                 {
-                    Print($"Error opening trade: {result.Error}");
+                    Print($"Error modifying position {position.Id} to set SL/TP: {modifyResult.Error}");
+                }
+            }
+            else
+            {
+                Print($"Error opening trade: {result.Error}");
                 }
             }
         }

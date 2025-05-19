@@ -40,6 +40,30 @@ namespace cAlgo.Robots
         public TimeFrame TF { get; set; }         // TimeFrame on which fractal was identified
     }
 
+    // New class for Historical Trade Replay
+    public class HistoricalTradeInfo
+    {
+        public DateTime EntryTimeUTC { get; set; }
+        public bool IsLong { get; set; }
+        public string Symbol { get; set; }
+        public bool IsProcessed { get; set; } = false;
+
+        public HistoricalTradeInfo(string dateTimeStr, bool isLong, string symbol)
+        {
+            if (DateTime.TryParse(dateTimeStr, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out DateTime parsedTime))
+            {
+                EntryTimeUTC = parsedTime;
+            }
+            else
+            {
+                // Handle parsing error or set a default, though this should be caught by user providing correct format
+                throw new ArgumentException($"Invalid DateTime format for historical trade: {dateTimeStr}");
+            }
+            IsLong = isLong;
+            Symbol = symbol;
+        }
+    }
+
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
     public class FifteenMinuteOFBot : Robot
     {
@@ -111,6 +135,18 @@ namespace cAlgo.Robots
         [Parameter("Max Armed Duration (Bars)", DefaultValue = 10, MinValue = 1, MaxValue = 50, Group = "Strategy")]
         public int MaxArmedDurationBars { get; set; }
 
+        [Parameter("Max Bars For Entry Signal Age", DefaultValue = 1, MinValue = 1, MaxValue = 5, Group = "Strategy")]
+        public int MaxBarsForEntrySignalAge { get; set; }
+
+        [Parameter("Min SL (API Pips)", DefaultValue = 1.0, MinValue = 0.1, Step = 0.1, Group = "Strategy")]
+        public double MinSL_API_Pips { get; set; }
+
+        [Parameter("---- Historical Replay ----", Group = "Historical Replay")]
+        public string SeparatorHist { get; set; }
+
+        [Parameter("Enable Historical Replay Mode", DefaultValue = false, Group = "Historical Replay")]
+        public bool EnableHistoricalReplayMode { get; set; }
+
         // Internal state variables
         private string _currentD1Context = "Initializing...";
         private DateTime _lastD1ContextUpdateDate = DateTime.MinValue;
@@ -123,6 +159,9 @@ namespace cAlgo.Robots
         private bool _isArmedForShort = false;
         private ArmingInfo _armingDetails = null;
         private DateTime _setupArmedTime = DateTime.MinValue;
+
+        // List for historical trades
+        private List<HistoricalTradeInfo> _historicalTrades = new List<HistoricalTradeInfo>();
 
         protected override void OnStart()
         {
@@ -142,13 +181,19 @@ namespace cAlgo.Robots
             Print($"Rule 1 LS Params: Lookback={Rule1_LSLookbackBars}, DetectionWindow={Rule1_LSDetectionWindowBars}");
             Print($"FVG Params: Lookback={FVGLookbackBars}, TestWindow={FVGTestWindowBars}, ImpulseLookback={FVGImpulseLookbackBars}");
             Print($"Fractal Params: Lookback={FractalLookbackBars}");
-            Print($"Strategy Params: MaxArmedDurationBars={MaxArmedDurationBars}");
+            Print($"Strategy Params: MaxArmedDurationBars={MaxArmedDurationBars}, MaxBarsForEntrySignalAge={MaxBarsForEntrySignalAge}, MinSL_API_Pips={MinSL_API_Pips}");
 
             if (TimeFrame != TimeFrame.Minute15)
             {
                 Print("WARNING: This bot is designed for the M15 timeframe. Please apply it to an M15 chart.");
             }
             
+            if (EnableHistoricalReplayMode)
+            {
+                InitializeHistoricalTrades();
+                Print($"Historical Replay Mode ENABLED. Loaded {_historicalTrades.Count(t => t.Symbol == SymbolName)} trades for {SymbolName}.");
+            }
+
             _d1Bars = MarketData.GetBars(TimeFrame.Daily);
             _h1Bars = MarketData.GetBars(TimeFrame.Hour); 
             DetermineD1Context(); // Initial D1 context
@@ -157,20 +202,28 @@ namespace cAlgo.Robots
 
         protected override void OnBar()
         {
-            if (!IsTradingSessionActive())
-            {
-                // Print("Trading session is not active. Skipping strategy logic.");
-                return;
-            }
-
+            // Always determine D1 context first, as it's needed for both modes
             bool newD1BarFormed = _d1Bars.OpenTimes.LastValue.Date > _lastD1ContextUpdateDate;
             if (newD1BarFormed || _currentD1Context == "Initializing...")
             {
                  Print("New D1 bar formed or initial run, re-evaluating D1 context...");
                  DetermineD1Context();
                  _lastD1ContextUpdateDate = _d1Bars.OpenTimes.LastValue.Date;
-                 // If D1 context changes, reset any armed state
-                 ResetArmedState("D1 Context Changed");
+                 // If D1 context changes, reset any armed state (relevant for normal mode)
+                 if (!EnableHistoricalReplayMode) ResetArmedState("D1 Context Changed");
+            }
+
+            if (EnableHistoricalReplayMode)
+            {
+                ProcessHistoricalTradeTrigger();
+                return; // Skip normal logic if in replay mode
+            }
+
+            // -------- Normal Trading Logic Starts Here --------
+            if (!IsTradingSessionActive())
+            {
+                // Print("Trading session is not active. Skipping strategy logic.");
+                return;
             }
 
             // If armed, check for entry trigger or timeout
@@ -268,7 +321,7 @@ namespace cAlgo.Robots
                 // Priority 1: FVG Test as entry trigger
                 FVGInfo bullishEntryFVG = currentFVGs.FirstOrDefault(fvg => fvg.IsBullish && 
                                                                     fvg.IsTested && 
-                                                                    fvg.TestBarIndex == 1); // Tested on last closed bar
+                                                                    fvg.TestBarIndex >= 1 && fvg.TestBarIndex <= MaxBarsForEntrySignalAge); // Use new parameter
                 if (bullishEntryFVG != null)
                 {
                     specificEntryPrice = bullishEntryFVG.Top; // Entry at the FVG's top border for bullish test
@@ -286,7 +339,7 @@ namespace cAlgo.Robots
                 if (!entryTriggerFound)
                 {
                     LiquiditySweepInfo bullishEntryLS = currentLSs.FirstOrDefault(ls => !ls.IsBullishSweepAbove && // Low swept, bullish signal
-                                                                                ls.ConfirmationBarIndex == 1); // Confirmed on last closed bar
+                                                                                ls.ConfirmationBarIndex >= 1 && ls.ConfirmationBarIndex <= MaxBarsForEntrySignalAge); // Use new parameter
                     if (bullishEntryLS != null)
                     {
                         specificEntryPrice = bullishEntryLS.SweptLevel; // Entry at the swept level
@@ -306,7 +359,7 @@ namespace cAlgo.Robots
                 // Priority 1: FVG Test as entry trigger
                 FVGInfo bearishEntryFVG = currentFVGs.FirstOrDefault(fvg => !fvg.IsBullish && 
                                                                     fvg.IsTested && 
-                                                                    fvg.TestBarIndex == 1); // Tested on last closed bar
+                                                                    fvg.TestBarIndex >= 1 && fvg.TestBarIndex <= MaxBarsForEntrySignalAge); // Use new parameter
                 if (bearishEntryFVG != null)
                 {
                     specificEntryPrice = bearishEntryFVG.Bottom; // Entry at the FVG's bottom border for bearish test
@@ -324,7 +377,7 @@ namespace cAlgo.Robots
                 if (!entryTriggerFound)
                 {
                     LiquiditySweepInfo bearishEntryLS = currentLSs.FirstOrDefault(ls => ls.IsBullishSweepAbove && // High swept, bearish signal
-                                                                                 ls.ConfirmationBarIndex == 1); // Confirmed on last closed bar
+                                                                                 ls.ConfirmationBarIndex >= 1 && ls.ConfirmationBarIndex <= MaxBarsForEntrySignalAge); // Use new parameter
                     if (bearishEntryLS != null)
                     {
                         specificEntryPrice = bearishEntryLS.SweptLevel; // Entry at the swept level
@@ -755,6 +808,9 @@ namespace cAlgo.Robots
             {
                 IsBullish = isBullish;
             }
+
+            // Default constructor for cases where IsBullish might be set later or not applicable initially
+            public ArmingInfo() {}
         }
 
         // Renamed from CheckForSetups. Now returns ArmingInfo and doesn't do SL/TP.
@@ -906,35 +962,26 @@ namespace cAlgo.Robots
             double slBasePrice = 0;
             string slReason = "";
 
-            // New SL Logic ("Вариант В")
+            // New SL Logic: Behind the bar that tested the FVG
             if (tradeInfo.EntryFVG != null) // FVG-based entry trigger
             {
                 FVGInfo entryFVG = tradeInfo.EntryFVG;
-                // Find swing low/high of the impulse that created this entryFVG
-                int impulseStartIndex = entryFVG.SourceBarIndex + 1; // Bar 1 of the FVG
-                double relevantPrice = tradeInfo.IsBullish ? double.MaxValue : double.MinValue;
-
-                for (int i = 0; i < FVGImpulseLookbackBars; ++i)
+                // New SL Logic: Behind the bar that tested the FVG
+                if (entryFVG.TestBarIndex < 1 || entryFVG.TestBarIndex >= Bars.Count)
                 {
-                    int barIdxToInspect = impulseStartIndex + i;
-                    if (barIdxToInspect >= Bars.Count) break; // Don't go out of bounds
+                    Print($"Error finding SL base for FVG entry: Invalid TestBarIndex ({entryFVG.TestBarIndex}) for FVG at {entryFVG.Time}");
+                    return false;
+                }
 
-                    if (tradeInfo.IsBullish)
-                    {
-                        relevantPrice = Math.Min(relevantPrice, Bars.LowPrices.Last(barIdxToInspect));
-                    }
-                    else
-                    {
-                        relevantPrice = Math.Max(relevantPrice, Bars.HighPrices.Last(barIdxToInspect));
-                    }
-                }
-                if ((tradeInfo.IsBullish && relevantPrice == double.MaxValue) || (!tradeInfo.IsBullish && relevantPrice == double.MinValue))
+                if (tradeInfo.IsBullish)
                 {
-                     Print($"Error finding SL base for FVG entry: No valid low/high in FVGImpulseLookbackBars ({FVGImpulseLookbackBars}) from FVG at {entryFVG.Time}");
-                     return false;
+                    slBasePrice = Bars.LowPrices.Last(entryFVG.TestBarIndex);
                 }
-                slBasePrice = relevantPrice;
-                slReason = $"{(tradeInfo.IsBullish ? "SwingLow" : "SwingHigh")} of FVG impulse (FVG @{entryFVG.Time}, Lookback {FVGImpulseLookbackBars} bars)";
+                else
+                {
+                    slBasePrice = Bars.HighPrices.Last(entryFVG.TestBarIndex);
+                }
+                slReason = $"{(tradeInfo.IsBullish ? "Low" : "High")} of FVG testing bar (FVG @{entryFVG.Time}, TestBar @{Bars.OpenTimes.Last(entryFVG.TestBarIndex)})";
             }
             else if (tradeInfo.EntryLS != null) // LS-based entry trigger
             {
@@ -985,8 +1032,8 @@ namespace cAlgo.Robots
                 return false;
             }
 
-            // Min SL check (placeholder value for minStopLossPipsParamValue, could be a param if needed)
-            double minStopLossPipsParamValue = 1.0; 
+            // Min SL check
+            double minStopLossPipsParamValue = MinSL_API_Pips; // Use new parameter
             double stopLossInStrategicPips = riskDistanceInPrice / strategicPipSize;
             double minStopLossInStrategicPipsThreshold = (minStopLossPipsParamValue * (Symbol.PipSize > 0 ? Symbol.PipSize : strategicPipSize) / strategicPipSize);
             if (stopLossInStrategicPips < minStopLossInStrategicPipsThreshold) 
@@ -1125,6 +1172,99 @@ namespace cAlgo.Robots
             else
             {
                 Print($"Error opening trade: {result.Error}");
+            }
+        }
+
+        // Method to initialize the list of historical trades
+        private void InitializeHistoricalTrades()
+        {
+            _historicalTrades.Clear();
+            // IMPORTANT: Replace placeholder times (e.g., "HH:mm:ss") with the EXACT M15 bar open time in UTC.
+            // Format: "yyyy-MM-dd HH:mm:ss"
+            
+            // Data extracted from screenshot (Year 2024 assumed for all)
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-11-05 07:00:00", true, "XAUUSD")); // XAU/USD, Nov 5, LONDON, Long - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-11-08 07:00:00", true, "GBPUSD")); // GBP/USD, Nov 8, LONDON, Long - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-11-08 07:00:00", true, "EURUSD")); // EUR/USD, Nov 8, LONDON, Long - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-11-21 07:00:00", false, "XAUUSD"));// XAU/USD, Nov 21, LONDON, Short - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-11-21 07:15:00", true, "XAUUSD")); // XAU/USD, Nov 21, LONDON, Long (assuming different time) - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-11-21 07:00:00", false, "EURUSD"));// EUR/USD, Nov 21, LONDON, Short - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-11-22 07:00:00", true, "XAUUSD")); // XAU/USD, Nov 22, LONDON, Long - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-11-25 07:00:00", true, "GBPUSD")); // GBP/USD, Nov 25, LONDON, Long - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-11-27 07:00:00", true, "XAUUSD")); // XAU/USD, Nov 27, LONDON, Long - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-11-27 07:00:00", true, "EURUSD")); // EUR/USD, Nov 27, LONDON, Long - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-11-28 07:00:00", true, "GBPUSD")); // GBP/USD, Nov 28, LONDON, Long - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-11-28 07:00:00", true, "XAUUSD")); // XAU/USD, Nov 28, LONDON, Long - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-12-04 07:00:00", true, "EURUSD")); // EUR/USD, Dec 4, LONDON, Long - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-12-05 12:00:00", true, "GBPUSD")); // GBP/USD, Dec 5, NY, Long - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-12-10 12:00:00", false, "GBPUSD"));// GBP/USD, Dec 10, OVERLAP, Short - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-12-10 07:00:00", false, "XAUUSD"));// XAU/USD, Dec 10, LONDON, Short - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-12-11 12:00:00", true, "XAUUSD")); // XAU/USD, Dec 11, OVERLAP, Long - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-12-11 07:00:00", false, "GBPUSD"));// GBP/USD, Dec 11, LONDON, Short - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-12-12 07:00:00", true, "EURUSD")); // EUR/USD, Dec 12, LONDON, Long - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-12-12 12:00:00", false, "EURUSD"));// EUR/USD, Dec 12, OVERLAP, Short - REPLACE TIME
+            _historicalTrades.Add(new HistoricalTradeInfo("2024-12-12 12:00:00", false, "XAUUSD"));// XAU/USD, Dec 12, OVERLAP, Short - REPLACE TIME
+            // Add more trades as needed
+            // Example: _historicalTrades.Add(new HistoricalTradeInfo("YYYY-MM-DD HH:MM:SS", true, "EURUSD")); // For a Buy on EURUSD
+        }
+
+        private void ProcessHistoricalTradeTrigger()
+        {
+            if (!EnableHistoricalReplayMode) return;
+
+            DateTime currentBarTime = Bars.OpenTimes.LastValue;
+
+            foreach (var trade in _historicalTrades)
+            {
+                if (trade.Symbol == SymbolName && !trade.IsProcessed && trade.EntryTimeUTC == currentBarTime)
+                {
+                    Print($"HISTORICAL REPLAY: Matched historical trade for {SymbolName} at {currentBarTime}. IsLong: {trade.IsLong}");
+                    trade.IsProcessed = true; // Mark as processed to avoid re-triggering
+
+                    // Restore D1 context check for historical replay
+                    // bool d1ContextAligned = true; // FORCED TRUE FOR DEBUGGING - This line is now removed/commented
+                    // Print($"HISTORICAL REPLAY: D1 context check BYPASSED for historical trade. Assuming aligned. Current actual D1: {_currentD1Context}");
+
+                    // Original D1 Context Check - Now active again
+                    bool d1ContextAligned = (trade.IsLong && _currentD1Context == "Uptrend") ||
+                                            (!trade.IsLong && _currentD1Context == "Downtrend");
+
+                    if (!d1ContextAligned)
+                    {
+                        Print($"HISTORICAL REPLAY: D1 context ({_currentD1Context}) not aligned for historical trade. Skipping.");
+                        return; // Stop processing this trade further
+                    }
+                    Print($"HISTORICAL REPLAY: D1 context ({_currentD1Context}) IS aligned.");
+                    
+
+                    // Simulate arming for this specific trade
+                    _isArmedForLong = trade.IsLong;
+                    _isArmedForShort = !trade.IsLong;
+                    _armingDetails = new ArmingInfo(trade.IsLong)
+                    {
+                        IsMet = true,
+                        ArmingPattern = "HistoricalReplay",
+                        ArmingSignalTime = currentBarTime, // Or the actual setup time if available
+                        // No specific LS or FVG needed here as we force the entry check
+                    };
+                    _setupArmedTime = currentBarTime;
+                    Print($"HISTORICAL REPLAY: Bot ARMED {(trade.IsLong ? "LONG" : "SHORT")} for historical entry at {currentBarTime}.");
+
+                    // Attempt to find an entry trigger *on this specific bar* using bot's rules
+                    bool tradeExecuted = LookForEntryTriggerAndExecute();
+
+                    if (tradeExecuted)
+                    {
+                        Print($"HISTORICAL REPLAY: Trade executed based on historical trigger at {currentBarTime}.");
+                        ResetArmedState("Historical trade executed.");
+                    }
+                    else
+                    {
+                        Print($"HISTORICAL REPLAY: Entry trigger found as per historical log, but bot's current rules DID NOT find a valid FVG/LS entry on bar {currentBarTime}. No trade placed by bot logic.");
+                        ResetArmedState("Historical trade attempt completed (no valid bot entry found).");
+                    }
+                    return; // Process one historical trade per bar for clarity
+                }
             }
         }
     }

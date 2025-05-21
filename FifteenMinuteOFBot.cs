@@ -1232,118 +1232,47 @@ namespace cAlgo.Robots
             double volumeInUnits = tradeToExecute.CalculatedVolumeInUnits;
             string symbolName = SymbolName;
             
-            // Абсолютные уровни SL/TP, рассчитанные в TryCalculateTradeParameters
+            // Используем SL/TP, рассчитанные в TryCalculateTradeParameters
             double intendedStopLossPrice = tradeToExecute.StopLossPrice;
-            double intendedTakeProfitPrice = tradeToExecute.TakeProfitTargetPrice;
+            double? intendedTakeProfitPrice = tradeToExecute.TakeProfitTargetPrice; // TP может быть null, если не найден подходящий фрактал
 
             Print($"Attempting to open {tradeType} trade for {SymbolName} based on entry trigger at {tradeToExecute.EntryTriggerTime}.");
             Print($"  ARMING Pattern was: {_armingDetails?.ArmingPattern} at {_armingDetails?.ArmingSignalTime}");
-            Print($"  Intended Entry (approx): {tradeToExecute.EntryPrice.ToString("F" + Symbol.Digits)}"); // This was the basis for SL/TP calc
-            Print($"  Intended SL Price: {intendedStopLossPrice.ToString("F" + Symbol.Digits)}, Intended TP Price: {intendedTakeProfitPrice.ToString("F" + Symbol.Digits)}");
+            Print($"  Intended Entry (approx for SL/TP calc): {tradeToExecute.EntryPrice.ToString("F" + Symbol.Digits)}"); 
+            Print($"  Calculated SL Price: {intendedStopLossPrice.ToString("F" + Symbol.Digits)}, Calculated TP Price: {intendedTakeProfitPrice?.ToString("F" + Symbol.Digits) ?? "N/A"}");
             Print($"  Volume (Units): {volumeInUnits}");
             Print($"  Volume (Lots): {Symbol.VolumeInUnitsToQuantity(volumeInUnits)}");
             Print($"  Original Risk/Reward: {tradeToExecute.RiskRewardRatio:F2}");
+            Print($"  Stop Loss Trigger Method will be: Trade");
 
-            // Открываем ордер БЕЗ SL/TP изначально
-            var result = ExecuteMarketOrder(tradeType, symbolName, volumeInUnits, TradeLabel, null, null);
+            // Открываем ордер СРАЗУ с SL/TP
+            // Argument 7: comment (null)
+            // Argument 8: hasTrailingStop (false)
+            // Argument 9: stopLossTriggerMethod (StopTriggerMethod.Trade)
+            var result = ExecuteMarketOrder(tradeType, symbolName, volumeInUnits, TradeLabel, intendedStopLossPrice, intendedTakeProfitPrice, null, false, StopTriggerMethod.Trade);
 
             if (result.IsSuccessful)
             {
                 Position position = result.Position;
-                Print($"Market Order Sent: {tradeType} {Symbol.VolumeInUnitsToQuantity(volumeInUnits)} lots of {SymbolName}. Position ID: {position.Id}, Actual Entry: {position.EntryPrice.ToString("F"+Symbol.Digits)}");
+                Print($"Market Order Sent and SUCCEEDED: {tradeType} {Symbol.VolumeInUnitsToQuantity(volumeInUnits)} lots of {SymbolName}. Position ID: {position.Id}");
+                Print($"  Actual Entry Price: {position.EntryPrice.ToString("F"+Symbol.Digits)}");
+                Print($"  SL Sent: {intendedStopLossPrice.ToString("F"+Symbol.Digits)}, Actual SL on Position: {position.StopLoss?.ToString("F" + Symbol.Digits) ?? "N/A"}");
+                Print($"  TP Sent: {intendedTakeProfitPrice?.ToString("F" + Symbol.Digits) ?? "N/A"}, Actual TP on Position: {position.TakeProfit?.ToString("F" + Symbol.Digits) ?? "N/A"}");
+                Print($"  StopLoss Trigger on Position: {position.StopLossTriggerMethod}"); // Log actual trigger method
 
-                int slTpBufferTicks = SLTPBufferTicks; 
-                double finalStopLossForModify;
-                double? finalTakeProfitForModifyNullable = null; 
-
-                // --- Расчет SL с буфером ---
-                if (tradeType == TradeType.Buy)
+                // Проверка, если SL/TP не установились, несмотря на успешный ордер
+                if (position.StopLoss == null && intendedStopLossPrice != 0) // intendedStopLossPrice != 0 to avoid warning if SL was meant to be none
                 {
-                    finalStopLossForModify = intendedStopLossPrice - (slTpBufferTicks * Symbol.TickSize);
+                    Print("WARNING: Stop Loss was sent but is NOT on the position. Possible rejection by server due to distance/rules.");
                 }
-                else // Sell
+                if (position.TakeProfit == null && intendedTakeProfitPrice.HasValue)
                 {
-                    finalStopLossForModify = intendedStopLossPrice + (slTpBufferTicks * Symbol.TickSize);
+                    Print("WARNING: Take Profit was sent but is NOT on the position. Possible rejection by server due to distance/rules.");
                 }
-                double normalizedBufferedStopLoss = Math.Round(finalStopLossForModify, Symbol.Digits);
-
-                // --- Расчет TP с буфером и проверка жизнеспособности (учитывает position.EntryPrice) ---
-                double tempTakeProfitForModify;
-                if (tradeType == TradeType.Buy)
-                {
-                    tempTakeProfitForModify = intendedTakeProfitPrice + (slTpBufferTicks * Symbol.TickSize);
-                    if (tempTakeProfitForModify > position.EntryPrice) 
-                    {
-                        finalTakeProfitForModifyNullable = Math.Round(tempTakeProfitForModify, Symbol.Digits);
-                    }
-                    else
-                    {
-                        Print($"Calculated TP {tempTakeProfitForModify.ToString("F"+Symbol.Digits)} (intended: {intendedTakeProfitPrice.ToString("F"+Symbol.Digits)}) is not above actual entry price {position.EntryPrice.ToString("F"+Symbol.Digits)} after buffer. TP will not be set.");
-                    }
-                }
-                else // Sell
-                {
-                    tempTakeProfitForModify = intendedTakeProfitPrice - (slTpBufferTicks * Symbol.TickSize);
-                    if (tempTakeProfitForModify < position.EntryPrice) 
-                    {
-                        finalTakeProfitForModifyNullable = Math.Round(tempTakeProfitForModify, Symbol.Digits);
-                    }
-                    else
-                    {
-                        Print($"Calculated TP {tempTakeProfitForModify.ToString("F"+Symbol.Digits)} (intended: {intendedTakeProfitPrice.ToString("F"+Symbol.Digits)}) is not below actual entry price {position.EntryPrice.ToString("F"+Symbol.Digits)} after buffer. TP will not be set.");
-                    }
-                }
-                
-                Print($"Attempting to modify position {position.Id}: ");
-                Print($"  Current Bid: {Symbol.Bid.ToString("F"+Symbol.Digits)}, Current Ask: {Symbol.Ask.ToString("F"+Symbol.Digits)}");
-                Print($"  SL to ~{normalizedBufferedStopLoss.ToString("F"+Symbol.Digits)} (original intended SL: {intendedStopLossPrice.ToString("F"+Symbol.Digits)}, Trigger: Trade)");
-                if (finalTakeProfitForModifyNullable.HasValue)
-                {
-                    Print($"  TP to ~{finalTakeProfitForModifyNullable.Value.ToString("F"+Symbol.Digits)} (original intended TP: {intendedTakeProfitPrice.ToString("F"+Symbol.Digits)})" );
-                } else {
-                    Print($"  TP will not be set as it was invalid after entry price slippage and buffer consideration.");
-                }
-
-                // Use Robot.ModifyPosition with StopTriggerMethod and null for trailing stop
-                // Convert normalizedBufferedStopLoss to double? for the call
-                double? stopLossToSet = normalizedBufferedStopLoss;
-
-                // Check if SL is valid against actual entry price *before* calling ModifyPosition
-                bool isSlValidForModify = false;
-                if (tradeType == TradeType.Buy && stopLossToSet < position.EntryPrice)
-                {
-                    isSlValidForModify = true;
-                }
-                else if (tradeType == TradeType.Sell && stopLossToSet > position.EntryPrice)
-                {
-                    isSlValidForModify = true;
-                }
-
-                if (!isSlValidForModify)
-                {
-                    Print($"CRITICAL: Stop Loss {stopLossToSet?.ToString("F"+Symbol.Digits) ?? "N/A"} is on the wrong side of actual entry price {position.EntryPrice.ToString("F"+Symbol.Digits)}. SL will NOT be set by ModifyPosition. Consider closing position manually if this is unintended.");
-                    // We proceed to call ModifyPosition, which will likely fail for SL or set it to an undesired value if the platform has fallback logic.
-                    // Alternatively, we could choose *not* to call ModifyPosition or to set stopLossToSet to null.
-                    // For now, we let it proceed so user sees the platform's behavior or error.
-                }
-
-                // var modifyResult = ModifyPosition(position, stopLossToSet, finalTakeProfitForModifyNullable, StopTriggerMethod.Trade, null);
-                // Corrected call based on compiler errors CS1503 for args 4 and 5:
-                var modifyResult = ModifyPosition(position, stopLossToSet, finalTakeProfitForModifyNullable, null, false);
-
-                if (modifyResult.IsSuccessful)
-                {
-                    Print($"Position SL/TP modification request successful. Actual SL: {position.StopLoss?.ToString("F"+Symbol.Digits) ?? "N/A"}, Actual TP: {position.TakeProfit?.ToString("F"+Symbol.Digits) ?? "N/A"}");
-                }
-                else
-                {
-                    Print($"Error modifying position {position.Id} to set SL/TP: {modifyResult.Error}. SL Tried: {stopLossToSet?.ToString("F"+Symbol.Digits) ?? "N/A"}, TP Tried: {finalTakeProfitForModifyNullable?.ToString("F"+Symbol.Digits) ?? "N/A"}");
-                }
-                Print($"Trade Update (Post-Modification Attempt): Entry at {position.EntryPrice.ToString("F" + Symbol.Digits)}. SL Actual: {position.StopLoss?.ToString("F" + Symbol.Digits) ?? "N/A"}, TP Actual: {position.TakeProfit?.ToString("F" + Symbol.Digits) ?? "N/A"}");
             }
             else
             {
-                Print($"Error opening trade: {result.Error}");
+                Print($"Error opening trade: {result.Error}. SL tried: {intendedStopLossPrice.ToString("F"+Symbol.Digits)}, TP tried: {intendedTakeProfitPrice?.ToString("F"+Symbol.Digits) ?? "N/A"}");
             }
         }
 

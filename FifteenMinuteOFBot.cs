@@ -94,7 +94,7 @@ namespace cAlgo.Robots
         [Parameter("---- Rule 1 LS Parameters ----", Group = "Strategy - Rule 1 LS")]
         public string SeparatorRule1LS { get; set; }
 
-        [Parameter("Rule 1 LS Lookback Bars", DefaultValue = 20, MinValue = 3, MaxValue = 100, Group = "Strategy - Rule 1 LS")]
+        [Parameter("Rule 1 LS Lookback Bars", DefaultValue = 20, MinValue = 3, MaxValue = 1000, Group = "Strategy - Rule 1 LS")]
         public int Rule1_LSLookbackBars { get; set; }
 
         [Parameter("Rule 1 LS Detection Window", DefaultValue = 5, MinValue = 1, MaxValue = 10, Group = "Strategy - Rule 1 LS")]
@@ -722,6 +722,7 @@ namespace cAlgo.Robots
                         WickHigh = detectionBarHigh,
                         WickLow = detectionBarLow
                     });
+                    Print($"LS Sweep detected! Type: High Sweep (Bearish), BarTime: {detectionBarTime:yyyy-MM-dd HH:mm}, SweptLevel: {recentHigh}, WickHigh: {detectionBarHigh}, WickLow: {detectionBarLow}, Lookback: {lookbackBars}, DetectionWindow: {detectionWindowBars}, BarIndex: {i}");
                 }
 
                 if (lowBarIndex != -1 && detectionBarLow < recentLow && detectionBarClose > recentLow)
@@ -735,6 +736,7 @@ namespace cAlgo.Robots
                         WickHigh = detectionBarHigh,
                         WickLow = detectionBarLow
                     });
+                    Print($"LS Sweep detected! Type: Low Sweep (Bullish), BarTime: {detectionBarTime:yyyy-MM-dd HH:mm}, SweptLevel: {recentLow}, WickHigh: {detectionBarHigh}, WickLow: {detectionBarLow}, Lookback: {lookbackBars}, DetectionWindow: {detectionWindowBars}, BarIndex: {i}");
                 }
             }
             return sweeps.OrderBy(s => s.ConfirmationBarIndex).ToList(); 

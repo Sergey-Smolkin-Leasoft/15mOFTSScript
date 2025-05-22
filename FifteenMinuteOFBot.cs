@@ -97,7 +97,7 @@ namespace cAlgo.Robots
         [Parameter("Rule 1 LS Lookback Bars", DefaultValue = 20, MinValue = 3, MaxValue = 1000, Group = "Strategy - Rule 1 LS")]
         public int Rule1_LSLookbackBars { get; set; }
 
-        [Parameter("Rule 1 LS Detection Window", DefaultValue = 5, MinValue = 1, MaxValue = 10, Group = "Strategy - Rule 1 LS")]
+        [Parameter("Rule 1 LS Detection Window", DefaultValue = 5, MinValue = 1, MaxValue = 50, Group = "Strategy - Rule 1 LS")]
         public int Rule1_LSDetectionWindowBars { get; set; }
 
         [Parameter("---- Fractal Parameters ----", Group = "Strategy - Fractals")]
@@ -159,6 +159,9 @@ namespace cAlgo.Robots
 
         [Parameter("Enable Historical Replay Mode", DefaultValue = false, Group = "Historical Replay")]
         public bool EnableHistoricalReplayMode { get; set; }
+
+        [Parameter("Enable Debug Chart", DefaultValue = false, Group = "Debug/Visual")]
+        public bool EnableDebugChart { get; set; }
 
         // Internal state variables
         private string _currentD1Context = "Initializing...";
@@ -305,6 +308,16 @@ namespace cAlgo.Robots
                 {
                     // Print($"H1 Context: {_currentD1Context}. Not looking for arming conditions.");
                 }
+            }
+
+            // После основной логики:
+            if (EnableDebugChart)
+            {
+                var allSweeps = FindLiquiditySweeps(Bars, Rule1_LSLookbackBars, Rule1_LSDetectionWindowBars);
+
+
+                var rule1Sweeps = FindLiquiditySweeps(Bars, Rule1_LSLookbackBars, Rule1_LSDetectionWindowBars);
+                DrawDebugChartRule1LS(rule1Sweeps);
             }
         }
 
@@ -679,6 +692,10 @@ namespace cAlgo.Robots
                 return sweeps; 
             }
 
+            int minBarsAge = 96; // 1 день для M15 (96 баров)
+            TimeSpan minAge = TimeSpan.FromDays(1);
+
+            // Для каждого бара в Detection Window
             for (int i = 1; i <= detectionWindowBars; i++)
             {
                 var detectionBar = series.Last(i); 
@@ -689,54 +706,65 @@ namespace cAlgo.Robots
 
                 int lookbackStartIdx = i + 1; 
                 int lookbackEndIdx = i + lookbackBars;
-
                 if (series.Count <= lookbackEndIdx) continue;
 
-                double recentHigh = double.MinValue;
-                double recentLow = double.MaxValue;
-                int highBarIndex = -1;
-                int lowBarIndex = -1;
-
+                // Ищем все локальные минимумы и максимумы в Lookback
                 for (int k = lookbackStartIdx; k <= lookbackEndIdx; k++)
                 {
-                    if (series.HighPrices.Last(k) > recentHigh)
+                    // Локальный минимум
+                    if (k > lookbackStartIdx && k < lookbackEndIdx &&
+                        series.LowPrices.Last(k) < series.LowPrices.Last(k - 1) &&
+                        series.LowPrices.Last(k) < series.LowPrices.Last(k + 1))
                     {
-                        recentHigh = series.HighPrices.Last(k);
-                        highBarIndex = k; 
+                        double localMin = series.LowPrices.Last(k);
+                        DateTime localMinTime = series.OpenTimes.Last(k);
+                        int ageBars = k - i;
+                        TimeSpan ageTime = detectionBarTime - localMinTime;
+                        if (ageBars >= minBarsAge && ageTime >= minAge)
+                        {
+                            // Проверяем sweep
+                            if (detectionBarLow < localMin && detectionBarClose > localMin)
+                            {
+                                sweeps.Add(new LiquiditySweepInfo
+                                {
+                                    Time = detectionBarTime,
+                                    SweptLevel = localMin,
+                                    IsBullishSweepAbove = false, 
+                                    ConfirmationBarIndex = i,
+                                    WickHigh = detectionBarHigh,
+                                    WickLow = detectionBarLow
+                                });
+                                Print($"LS Sweep detected! Type: Low Sweep (Bullish), BarTime: {detectionBarTime:yyyy-MM-dd HH:mm}, SweptLevel: {localMin}, WickHigh: {detectionBarHigh}, WickLow: {detectionBarLow}, Lookback: {lookbackBars}, DetectionWindow: {detectionWindowBars}, BarIndex: {i}, ExtremumAgeBars: {ageBars}, ExtremumAgeTime: {ageTime.TotalHours:F1}h");
+                            }
+                        }
                     }
-                    if (series.LowPrices.Last(k) < recentLow)
+                    // Локальный максимум
+                    if (k > lookbackStartIdx && k < lookbackEndIdx &&
+                        series.HighPrices.Last(k) > series.HighPrices.Last(k - 1) &&
+                        series.HighPrices.Last(k) > series.HighPrices.Last(k + 1))
                     {
-                        recentLow = series.LowPrices.Last(k);
-                        lowBarIndex = k;
+                        double localMax = series.HighPrices.Last(k);
+                        DateTime localMaxTime = series.OpenTimes.Last(k);
+                        int ageBars = k - i;
+                        TimeSpan ageTime = detectionBarTime - localMaxTime;
+                        if (ageBars >= minBarsAge && ageTime >= minAge)
+                        {
+                            // Проверяем sweep
+                            if (detectionBarHigh > localMax && detectionBarClose < localMax)
+                            {
+                                sweeps.Add(new LiquiditySweepInfo
+                                {
+                                    Time = detectionBarTime,
+                                    SweptLevel = localMax,
+                                    IsBullishSweepAbove = true, 
+                                    ConfirmationBarIndex = i,
+                                    WickHigh = detectionBarHigh,
+                                    WickLow = detectionBarLow
+                                });
+                                Print($"LS Sweep detected! Type: High Sweep (Bearish), BarTime: {detectionBarTime:yyyy-MM-dd HH:mm}, SweptLevel: {localMax}, WickHigh: {detectionBarHigh}, WickLow: {detectionBarLow}, Lookback: {lookbackBars}, DetectionWindow: {detectionWindowBars}, BarIndex: {i}, ExtremumAgeBars: {ageBars}, ExtremumAgeTime: {ageTime.TotalHours:F1}h");
+                            }
+                        }
                     }
-                }
-                
-                if (highBarIndex != -1 && detectionBarHigh > recentHigh && detectionBarClose < recentHigh)
-                {
-                    sweeps.Add(new LiquiditySweepInfo
-                    {
-                        Time = detectionBarTime,
-                        SweptLevel = recentHigh,
-                        IsBullishSweepAbove = true, 
-                        ConfirmationBarIndex = i,
-                        WickHigh = detectionBarHigh,
-                        WickLow = detectionBarLow
-                    });
-                    Print($"LS Sweep detected! Type: High Sweep (Bearish), BarTime: {detectionBarTime:yyyy-MM-dd HH:mm}, SweptLevel: {recentHigh}, WickHigh: {detectionBarHigh}, WickLow: {detectionBarLow}, Lookback: {lookbackBars}, DetectionWindow: {detectionWindowBars}, BarIndex: {i}");
-                }
-
-                if (lowBarIndex != -1 && detectionBarLow < recentLow && detectionBarClose > recentLow)
-                {
-                    sweeps.Add(new LiquiditySweepInfo
-                    {
-                        Time = detectionBarTime,
-                        SweptLevel = recentLow,
-                        IsBullishSweepAbove = false, 
-                        ConfirmationBarIndex = i,
-                        WickHigh = detectionBarHigh,
-                        WickLow = detectionBarLow
-                    });
-                    Print($"LS Sweep detected! Type: Low Sweep (Bullish), BarTime: {detectionBarTime:yyyy-MM-dd HH:mm}, SweptLevel: {recentLow}, WickHigh: {detectionBarHigh}, WickLow: {detectionBarLow}, Lookback: {lookbackBars}, DetectionWindow: {detectionWindowBars}, BarIndex: {i}");
                 }
             }
             return sweeps.OrderBy(s => s.ConfirmationBarIndex).ToList(); 
@@ -1368,6 +1396,43 @@ namespace cAlgo.Robots
                     }
                     return; // Process one historical trade per bar for clarity
                 }
+            }
+        }
+
+        private void DrawDebugChart(List<LiquiditySweepInfo> sweeps, List<FVG> fvgs, List<FractalInfo> fractals)
+        {
+            if (!EnableDebugChart) return;
+            // LS Sweeps
+            foreach (var sweep in sweeps)
+            {
+                string key = $"LS_Sweep_{sweep.Time:yyyyMMdd_HHmmss}_{sweep.SweptLevel}";
+                Chart.DrawIcon(key, sweep.IsBullishSweepAbove ? ChartIconType.DownArrow : ChartIconType.UpArrow, sweep.Time, sweep.SweptLevel, sweep.IsBullishSweepAbove ? Color.Red : Color.Blue);
+                Chart.DrawText($"LS_Label_{key}", $"LS Sweep\n{(sweep.IsBullishSweepAbove ? "High" : "Low")}", sweep.Time, sweep.SweptLevel + (sweep.IsBullishSweepAbove ? 10 : -10), sweep.IsBullishSweepAbove ? Color.Red : Color.Blue);
+            }
+            // FVGs
+            foreach (var fvg in fvgs)
+            {
+                string key = $"FVG_{fvg.OpenTimeOfFirstBar:yyyyMMdd_HHmmss}_{fvg.Top}_{fvg.Bottom}";
+                Chart.DrawRectangle(key, fvg.Bar1.OpenTime, fvg.Top, fvg.Bar3.OpenTime, fvg.Bottom, fvg.IsBullish ? Color.FromArgb(60, 0, 128, 0) : Color.FromArgb(60, 128, 0, 0));
+                Chart.DrawText($"FVG_Label_{key}", fvg.IsBullish ? "FVG Bullish" : "FVG Bearish", fvg.Bar1.OpenTime, fvg.Top + (fvg.IsBullish ? 10 : -10), fvg.IsBullish ? Color.Green : Color.Red);
+            }
+            // Fractals
+            foreach (var fr in fractals)
+            {
+                string key = $"Fractal_{fr.Time:yyyyMMdd_HHmmss}_{fr.Price}";
+                Chart.DrawIcon(key, fr.IsHighFractal ? ChartIconType.Diamond : ChartIconType.Circle, fr.Time, fr.Price, fr.IsHighFractal ? Color.Orange : Color.Purple);
+                Chart.DrawText($"Fractal_Label_{key}", fr.IsHighFractal ? "High Fractal" : "Low Fractal", fr.Time, fr.Price + (fr.IsHighFractal ? 10 : -10), fr.IsHighFractal ? Color.Orange : Color.Purple);
+            }
+        }
+
+        private void DrawDebugChartRule1LS(List<LiquiditySweepInfo> rule1Sweeps)
+        {
+            if (!EnableDebugChart) return;
+            foreach (var sweep in rule1Sweeps)
+            {
+                string key = $"LS_Rule1_{sweep.Time:yyyyMMdd_HHmmss}_{sweep.SweptLevel}";
+                Chart.DrawIcon(key, sweep.IsBullishSweepAbove ? ChartIconType.DownArrow : ChartIconType.UpArrow, sweep.Time, sweep.SweptLevel, sweep.IsBullishSweepAbove ? Color.Red : Color.Blue);
+                Chart.DrawText($"LS_Label_{key}", $"Rule 1 LS\n{(sweep.IsBullishSweepAbove ? "High" : "Low")}", sweep.Time, sweep.SweptLevel + (sweep.IsBullishSweepAbove ? 10 : -10), sweep.IsBullishSweepAbove ? Color.Red : Color.Blue);
             }
         }
     }
